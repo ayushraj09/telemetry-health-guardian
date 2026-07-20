@@ -20,6 +20,10 @@ from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
+from griptape.configs.defaults_config import Defaults
+from griptape.configs.drivers.openai_drivers_config import OpenAiDriversConfig
+from griptape.drivers.prompt.openai import OpenAiChatPromptDriver
+
 
 def _parse_otlp_headers(raw: str) -> dict:
     headers = {}
@@ -30,6 +34,16 @@ def _parse_otlp_headers(raw: str) -> dict:
         key, value = pair.split("=", 1)
         headers[key.strip()] = value.strip()
     return headers
+
+
+class _NanoOpenAiDriversConfig(OpenAiDriversConfig):
+    @property
+    def prompt_driver(self) -> OpenAiChatPromptDriver:
+        return OpenAiChatPromptDriver(model="gpt-4.1-nano")
+
+
+def _configure_griptape_defaults() -> None:
+    Defaults._drivers_config = _NanoOpenAiDriversConfig()
 
 
 def init_telemetry(service_name: str | None = None) -> TracerProvider:
@@ -46,6 +60,8 @@ def init_telemetry(service_name: str | None = None) -> TracerProvider:
     once this has run and installed the global provider.
     """
     name = service_name or os.getenv("OTEL_SERVICE_NAME", "document-research-pipeline")
+
+    _configure_griptape_defaults()
 
     if not isinstance(trace.get_tracer_provider(), TracerProvider):
         endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").rstrip("/")

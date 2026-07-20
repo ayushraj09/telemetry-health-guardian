@@ -8,6 +8,10 @@ Usage:
 Requires .env (copied from .env.example at repo root) with at least
 OPENAI_API_KEY, OTEL_EXPORTER_OTLP_ENDPOINT, and OTEL_EXPORTER_OTLP_HEADERS
 set.
+
+Chaos: set CHAOS_MODE=1 (see chaos.py) to seed R1/R2 fault injection for
+Stage 3's gate check. Untouched (CHAOS_MODE unset), this runs exactly as
+Stage 1/2 already verified.
 """
 
 import argparse
@@ -18,6 +22,10 @@ import sys
 from dotenv import load_dotenv
 
 load_dotenv()
+
+import chaos  # noqa: E402
+
+chaos.install_chaos()  # no-op unless CHAOS_MODE=1
 
 from opentelemetry import trace  # noqa: E402
 

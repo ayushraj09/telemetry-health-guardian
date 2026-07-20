@@ -136,13 +136,11 @@ def evaluate(spans: list[SpanRecord]) -> R1Result:
 # Needs live verification against a real SigNoz Cloud trial -- see
 # mcp_client.py's module docstring.
 
-_R1_BUILDER_QUERY_FIELDS = (
-    "GEN_AI_SYSTEM",
-    "GEN_AI_REQUEST_MODEL",
-    "GEN_AI_USAGE_INPUT_TOKENS",
-    "GEN_AI_USAGE_OUTPUT_TOKENS",
-    "GEN_AI_RESPONSE_FINISH_REASONS",
-)
+# Columns to pull back for each span. `span_id`/`trace_id`/`name` are
+# intrinsic span columns; the rest are the exact gen_ai.* attribute names
+# (dotted, real values -- not the Python constant names) R1 needs, per
+# REQUIRED_GEN_AI_FIELDS plus gen_ai.operation.name for the naming check.
+_R1_SELECT_FIELD_NAMES = ("span_id", "trace_id", "name", GEN_AI_OPERATION_NAME, *REQUIRED_GEN_AI_FIELDS)
 
 
 async def fetch_spans(client: SignozMCPClient, window: AuditWindow) -> list[SpanRecord]:
@@ -151,23 +149,50 @@ async def fetch_spans(client: SignozMCPClient, window: AuditWindow) -> list[Span
     presence and naming -- `signoz_aggregate_traces` alone can only give
     counts, not which specific spans/fields are missing, so it's used for
     smaller pre-checks like total-count sanity, not the primary fetch here).
+
+    Payload shape corrected against SigNoz's Query Builder v5 docs (Trace
+    API payload model / Search Traces / the QB v5 migration guide) after
+    the first version of this function 500'd against a live MCP server:
+    - `spec.filter` must be an object (`{"expression": "..."}`), never a
+      raw string -- that's the exact bug behind the
+      `cannot unmarshal string into Go struct field QuerySpec.filter of
+      type types.Filter` error.
+    - `start`/`end` (absolute epoch ms) belong at the *top level* of the
+      query object, not inside `spec` -- there's no `timeRange` support in
+      this raw envelope, unlike the convenience tools `window.as_mcp_kwargs()`
+      is designed for. Hence `window.as_absolute_ms_range()` instead here.
+    - `requestType: "raw"` is what actually gets a row-per-span response
+      back (per the same docs) rather than an aggregate.
+    - `spec.selectFields` needs to be listed explicitly to get the gen_ai.*
+      attributes back as columns at all.
+    Still unverified against a live server: the exact response envelope
+    (`_extract_rows`/`_parse_span_rows` below) and whether this SigNoz
+    instance's service-name filter key is `serviceName` vs `service.name`
+    (only exercised if `window.service` is set).
     """
+    start_ms, end_ms = window.as_absolute_ms_range()
+    filter_expression = f"{GEN_AI_OPERATION_NAME} = 'chat'"
+    if window.service:
+        filter_expression += f" AND serviceName = '{window.service}'"
+
     query = {
+        "start": start_ms,
+        "end": end_ms,
+        "requestType": "raw",
         "compositeQuery": {
-            "queryType": "builder",
             "queries": [
                 {
                     "type": "builder_query",
                     "spec": {
                         "name": "A",
                         "signal": "traces",
-                        "filter": f"{GEN_AI_OPERATION_NAME} = 'chat'",
-                        **window.as_mcp_kwargs(),
+                        "filter": {"expression": filter_expression},
+                        "selectFields": [{"name": field_name} for field_name in _R1_SELECT_FIELD_NAMES],
                         "limit": 1000,
                     },
                 }
             ],
-        }
+        },
     }
     raw = await client.execute_builder_query(query)
     return _parse_span_rows(raw)
