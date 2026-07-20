@@ -1,0 +1,6 @@
+# Stage 0 — MCP connection verification only.
+# More dependencies (opentelemetry-*, griptape, fastapi, apscheduler, litellm,
+# streamlit, etc.) get added stage by stage as those components are built —
+# see BUILD-SPEC.md Section 6.
+mcp>=1.9.0
+python-dotenv>=1.0.1

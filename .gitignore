@@ -1,0 +1,4 @@
+venv
+.env
+.env-signoz
+telemetry-health-guardian-BUILD-SPEC.md
