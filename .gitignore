@@ -2,3 +2,26 @@ venv
 .env
 .env-signoz
 telemetry-health-guardian-BUILD-SPEC.md
+stage1_output.txt
+
+# Ignore all __pycache__ folders recursively
+**/__pycache__/
+
+# Ignore individual compiled Python bytecode files
+*.pyc
+*.pyo
+*.pyd
+
+*.zip
+
+**/.pytest_cache/**
+uv.lock
+
+# MacOS files
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon\r
+._*
+.Spotlight-V100
+.Trashes

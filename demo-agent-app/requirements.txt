@@ -1,0 +1,12 @@
+griptape>=1.0.0
+openai>=1.0.0
+pypdf>=4.2.0
+python-dotenv>=1.0.1
+opentelemetry-sdk>=1.24.0
+opentelemetry-exporter-otlp-proto-http>=1.24.0
+# Local sibling package -- run `pip install -r requirements.txt` from
+# inside this directory (demo-agent-app/) so this relative path resolves.
+-e ../otel-griptape
+
+# Only needed once, to regenerate fixtures/long_climate_report.pdf
+reportlab>=4.0.0
