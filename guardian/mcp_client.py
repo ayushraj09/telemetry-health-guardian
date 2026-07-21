@@ -42,10 +42,10 @@ from __future__ import annotations
 import json
 import os
 from contextlib import AsyncExitStack
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+if TYPE_CHECKING:
+    from mcp import ClientSession
 
 
 class SignozMCPError(RuntimeError):
@@ -71,7 +71,7 @@ class SignozMCPClient:
         self._api_key_override = api_key
         self._signoz_url_override = signoz_url
         self._stack: AsyncExitStack | None = None
-        self._session: ClientSession | None = None
+        self._session: Any | None = None
 
     # -- connection config: the ONLY part that differs cloud vs self-host ---
 
@@ -98,6 +98,14 @@ class SignozMCPClient:
     # -- lifecycle ------------------------------------------------------
 
     async def __aenter__(self) -> SignozMCPClient:
+        try:
+            from mcp import ClientSession
+            from mcp.client.streamable_http import streamablehttp_client
+        except ModuleNotFoundError as exc:
+            raise SignozMCPError(
+                "Missing optional dependency 'mcp'. Install the project dependencies before using SignozMCPClient."
+            ) from exc
+
         url, headers = self._connection_config()
         self._stack = AsyncExitStack()
         read, write, _get_session_id = await self._stack.enter_async_context(
@@ -249,6 +257,37 @@ class SignozMCPClient:
                 "start": start,
                 "end": end,
                 "includeSpans": include_spans,
+            },
+        )
+
+    async def search_logs(
+        self,
+        filter: str | None = None,  # noqa: A002 -- matches the tool's own param name
+        service: str | None = None,
+        time_range: str | None = None,
+        start: int | None = None,
+        end: int | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> Any:
+        """Needed by R6 (Section 4.3.1) to cross-reference
+        `gen_ai.response.finish_reasons == "length"` against a truncated
+        tool-payload span, in the same trace. Parameter names mirrored from
+        `search_traces` above -- same convention, logs signal instead of
+        traces -- since the signoz-mcp-server README's search_logs entry
+        wasn't available to check directly from this environment (see
+        module docstring's honesty note); this needs the same live
+        confirmation before trusting it for Stage 4's gate check."""
+        return await self.call_tool(
+            "signoz_search_logs",
+            {
+                "filter": filter,
+                "service": service,
+                "timeRange": time_range,
+                "start": start,
+                "end": end,
+                "limit": limit,
+                "offset": offset,
             },
         )
 

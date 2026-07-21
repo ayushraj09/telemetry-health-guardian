@@ -24,32 +24,36 @@ service and works against any OTel-compatible backend, not just SigNoz.
 
 from __future__ import annotations
 
-from opentelemetry.sdk.trace import TracerProvider
+from typing import TYPE_CHECKING, Any
 
-from otel_griptape.context_propagation import (
-    inject_traceparent_header,
-    instrument_context_propagation,
-    uninstrument_context_propagation,
-)
-from otel_griptape.instrumentor import (
-    GriptapeSemconvObservabilityDriver,
-    _patch_openai_finish_reason_capture,
-    _unpatch_openai_finish_reason_capture,
-)
-from otel_griptape.payload_tracking import record_payload_sizes
+if TYPE_CHECKING:
+    from opentelemetry.sdk.trace import TracerProvider
 
 __all__ = [
     "instrument",
     "uninstrument",
     "inject_traceparent_header",
     "record_payload_sizes",
-    "GriptapeSemconvObservabilityDriver",
 ]
 
-_active_driver: GriptapeSemconvObservabilityDriver | None = None
+_active_driver: Any | None = None
 
 
-def instrument(tracer_provider: TracerProvider | None = None) -> GriptapeSemconvObservabilityDriver:
+def __getattr__(name: str) -> Any:
+    if name == "inject_traceparent_header":
+        from otel_griptape.context_propagation import inject_traceparent_header as value
+    elif name == "record_payload_sizes":
+        from otel_griptape.payload_tracking import record_payload_sizes as value
+    elif name == "GriptapeSemconvObservabilityDriver":
+        from otel_griptape.instrumentor import GriptapeSemconvObservabilityDriver as value
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    globals()[name] = value
+    return value
+
+
+def instrument(tracer_provider: TracerProvider | None = None) -> Any:
     """Install otel-griptape process-wide. Idempotent -- calling this more
     than once just returns the already-installed driver.
 
@@ -69,6 +73,12 @@ def instrument(tracer_provider: TracerProvider | None = None) -> GriptapeSemconv
     """
     global _active_driver  # noqa: PLW0603
 
+    from otel_griptape.context_propagation import instrument_context_propagation
+    from otel_griptape.instrumentor import (
+        GriptapeSemconvObservabilityDriver,
+        _patch_openai_finish_reason_capture,
+    )
+
     from griptape.observability import Observability
 
     if _active_driver is not None:
@@ -87,6 +97,9 @@ def instrument(tracer_provider: TracerProvider | None = None) -> GriptapeSemconv
 def uninstrument() -> None:
     """Reverse everything `instrument()` did. Mainly useful for tests."""
     global _active_driver  # noqa: PLW0603
+
+    from otel_griptape.context_propagation import uninstrument_context_propagation
+    from otel_griptape.instrumentor import _unpatch_openai_finish_reason_capture
 
     from griptape.observability import Observability
 
