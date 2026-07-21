@@ -1,0 +1,16 @@
+Stage0:
+Verify with "python verify_mcp_connection.py"
+
+Stage1 + Stage2:
+Verify with:
+1. "python -m otel-griptape/tests/test_instrumentor.py" #(run this from otel-griptape directory)
+2. "python app.py --question "What does the Kestrel Basin report say about sea level rise and drought?" --pdf fixtures/long_climate_report.pdf" # (run this from demo-agent-app directory and make sure to run "python demo-agent-app/fixtures/generate_fixture_pdf.py" once to get the required long_climate_report.pdf)
+3. In the SigNoz UI, go to Traces, filter by your service name, and open the trace from that run.
+    Check the three literal gate criteria:
+        (i) Token counts present — expand a chat <model> span, confirm gen_ai.usage.input_tokens / gen_ai.usage.output_tokens show real (non-zero) numbers.
+        (ii) Model name present — same span, confirm gen_ai.request.model matches what you actually called (e.g. gpt-4o-mini).
+        (iii) One connected trace tree — the whole run (Planner span → Fetch&Read → Fact-Check's parallel tool-call spans → Report Writer) should appear as a single trace with a single root, not split into multiple disconnected traces. Pay particular attention to the Fact-Check spans specifically — those are the ones that would go orphaned if the ThreadPoolExecutor.submit patch weren't working.
+    Repeat for 2 more runs (different questions/PDFs) — the spec asks for 3 sample traces, since one clean run could be a fluke and won't catch e.g. an intermittent context-propagation miss under real concurrency/timing (which is exactly the kind of bug that behaves differently than in my synthetic in-memory test).
+
+Stage3:
+Verify with "python test_stage3.py" from project root. Copy this file to project root and then run.

@@ -33,7 +33,8 @@ them; only the score conflates them, per the spec's placement of the formula.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import asyncio
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from otel_griptape.semconv import (
@@ -195,7 +196,80 @@ async def fetch_spans(client: SignozMCPClient, window: AuditWindow) -> list[Span
         },
     }
     raw = await client.execute_builder_query(query)
-    return _parse_span_rows(raw)
+    records = _parse_span_rows(raw)
+    return await _clear_absent_required_fields(client, window, records)
+
+
+async def _clear_absent_required_fields(
+    client: SignozMCPClient, window: AuditWindow, records: list[SpanRecord]
+) -> list[SpanRecord]:
+    """Confirmed live (2026-07-21, SigNoz Cloud): the raw builder query above
+    returns the zero-value for a numeric/string gen_ai.* attribute that was
+    never set on a span (e.g. a chaos-dropped `gen_ai.usage.input_tokens`
+    comes back as the literal row value `0`), not a JSON null and not an
+    omitted key. `evaluate()`'s `attributes.get(f) is None` check is correct
+    against real SDK span attributes, but is silently defeated by that
+    zero-default when fed data from this query -- a span missing a field
+    looks identical to a span that legitimately has value 0/''.
+
+    To recover true presence/absence we issue one additional query per
+    required field, using Query Builder v5's `EXISTS` filter operator
+    (confirmed syntax from SigNoz's own v4->v5 migration docs, e.g.
+    `"httpMethod EXISTS"`), and only keep a field in a span's parsed
+    attributes if that span's id shows up in the "field EXISTS" result set.
+    Any field not confirmed present is deleted from the dict so `evaluate()`
+    sees a real missing key -> `None` via `.get()`, same as it does in the
+    pure unit tests.
+    """
+    present_ids_by_field = dict(
+        zip(
+            REQUIRED_GEN_AI_FIELDS,
+            await asyncio.gather(
+                *(_fetch_present_span_ids(client, window, f) for f in REQUIRED_GEN_AI_FIELDS)
+            ),
+        )
+    )
+
+    cleaned: list[SpanRecord] = []
+    for record in records:
+        attrs = dict(record.attributes)
+        for f in REQUIRED_GEN_AI_FIELDS:
+            if f in attrs and record.span_id not in present_ids_by_field[f]:
+                del attrs[f]
+        cleaned.append(replace(record, attributes=attrs))
+    return cleaned
+
+
+async def _fetch_present_span_ids(client: SignozMCPClient, window: AuditWindow, field_name: str) -> set[str]:
+    """span_ids of chat spans that genuinely carry `field_name`, per an
+    `EXISTS`-filtered raw query -- see `_clear_absent_required_fields`."""
+    start_ms, end_ms = window.as_absolute_ms_range()
+    filter_expression = f"{GEN_AI_OPERATION_NAME} = 'chat' AND {field_name} EXISTS"
+    if window.service:
+        filter_expression += f" AND serviceName = '{window.service}'"
+
+    query = {
+        "start": start_ms,
+        "end": end_ms,
+        "requestType": "raw",
+        "compositeQuery": {
+            "queries": [
+                {
+                    "type": "builder_query",
+                    "spec": {
+                        "name": "A",
+                        "signal": "traces",
+                        "filter": {"expression": filter_expression},
+                        "selectFields": [{"name": "span_id"}],
+                        "limit": 1000,
+                    },
+                }
+            ],
+        },
+    }
+    raw = await client.execute_builder_query(query)
+    rows = _extract_rows(raw)
+    return {str(row.get("span_id") or row.get("spanId") or "") for row in rows}
 
 
 def _parse_span_rows(raw: Any) -> list[SpanRecord]:
@@ -223,11 +297,38 @@ def _parse_span_rows(raw: Any) -> list[SpanRecord]:
 
 
 def _extract_rows(raw: Any) -> list[dict]:
+    """Pull the list of span row dicts out of a `signoz_execute_builder_query`
+    raw-list response.
+
+    Confirmed live shape (SigNoz Cloud, region us2, 2026-07):
+        {"status": "success",
+         "data": {"type": "raw", "meta": {...},
+                   "data": {"results": [{"queryName": "A", "nextCursor": "",
+                                          "rows": [{"data": {...fields...},
+                                                    "timestamp": "..."}]}]}}}
+    i.e. rows are at data.data.results[0].rows -- two levels deeper than the
+    previous version of this function looked -- and each row's actual
+    selected-field values are nested one level further under that row's own
+    "data" key (a sibling of "timestamp"), not on the row dict directly.
+    Unwrapped here so `_parse_span_rows` always sees a flat field dict.
+    Falls back to a couple of flatter shapes before giving up and
+    returning [].
+    """
     if isinstance(raw, list):
         return raw
     if not isinstance(raw, dict):
         return []
-    data = raw.get("data", raw)
+
+    outer = raw.get("data", raw)
+    inner = outer.get("data", outer) if isinstance(outer, dict) else None
+    results = inner.get("results") if isinstance(inner, dict) else None
+    if isinstance(results, list) and results and isinstance(results[0], dict):
+        rows = results[0].get("rows")
+        if isinstance(rows, list):
+            return [row.get("data", row) if isinstance(row, dict) else row for row in rows]
+
+    # Fallback: flatter shapes some tools/versions may return.
+    data = outer if isinstance(outer, dict) else raw
     for key in ("result", "rows", "items"):
         candidate = data.get(key) if isinstance(data, dict) else None
         if isinstance(candidate, list):

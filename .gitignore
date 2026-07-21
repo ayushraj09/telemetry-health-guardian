@@ -3,9 +3,8 @@ venv
 .env-signoz
 telemetry-health-guardian-BUILD-SPEC.md
 stage1_output.txt
-stage_guidance.txt
 stage1_chaos_output.txt
-test_stage3.py
+*.pdf
 # Ignore all __pycache__ folders recursively
 **/__pycache__/
 
