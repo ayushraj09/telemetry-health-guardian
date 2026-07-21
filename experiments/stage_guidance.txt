@@ -13,4 +13,8 @@ Verify with:
     Repeat for 2 more runs (different questions/PDFs) — the spec asks for 3 sample traces, since one clean run could be a fluke and won't catch e.g. an intermittent context-propagation miss under real concurrency/timing (which is exactly the kind of bug that behaves differently than in my synthetic in-memory test).
 
 Stage3:
-Verify with "python test_stage3.py" from project root. Copy this file to project root and then run.
+First run the "CHAOS_MODE=1 CHAOS_R1_RATE=1.0 CHAOS_R2_RATE=1.0 CHAOS_SEED=42 python app.py --question "What does the Kestrel Basin report say about sea level rise and drought?" --pdf fixtures/long_climate_report.pdf > chaos_out.json"
+OR
+For no chaos (baseline) run this: "python app.py --question "What does the Kestrel Basin report say about sea level rise and drought?" --pdf fixtures/long_climate_report.pdf > baseline_out.json"
+
+Then verify with "python test_stage3.py" from project root. Copy this file to project root and then run.
