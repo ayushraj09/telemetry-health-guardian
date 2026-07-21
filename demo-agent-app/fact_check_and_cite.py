@@ -20,7 +20,10 @@ import json
 import re
 
 from griptape.structures import Agent
+from opentelemetry import context as otel_context
 from opentelemetry import trace
+
+import chaos
 
 tracer = trace.get_tracer(__name__)
 
@@ -57,9 +60,24 @@ async def _check_one_claim(claim: str, source_text: str) -> dict:
         span.set_attribute("claim.text", claim[:200])
 
         loop = asyncio.get_running_loop()
-        # run_in_executor hands this off to a worker thread so multiple
-        # claims can be checked in parallel without blocking the event loop.
-        result = await loop.run_in_executor(None, _run_claim_check_llm, claim, source_text)
+
+        # chaos.py's R3 trigger: no-op unless CHAOS_MODE=1 and this call
+        # wins the dice roll. When it fires, returns a context with a
+        # fabricated, non-existent parent span_id (same trace_id) to
+        # attach in place of the real ambient one for this one submission
+        # -- otel-griptape's context_propagation.py patch (Stage 2) will
+        # faithfully snapshot and propagate WHATEVER context is current at
+        # submission time, correct or corrupted; it has no way to tell the
+        # difference, which is exactly the point.
+        chaos_context = chaos.maybe_break_context_for_claim_check()
+        token = otel_context.attach(chaos_context) if chaos_context is not None else None
+        try:
+            # run_in_executor hands this off to a worker thread so multiple
+            # claims can be checked in parallel without blocking the event loop.
+            result = await loop.run_in_executor(None, _run_claim_check_llm, claim, source_text)
+        finally:
+            if token is not None:
+                otel_context.detach(token)
 
         span.set_attribute("claim.verdict", result["verdict"])
         return result

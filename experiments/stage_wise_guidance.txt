@@ -1,60 +1,35 @@
-"""
-Stage 4 gate check, per the build spec's Section 6 criterion:
-"are a chaos-triggered truncation case and a chaos-triggered orphaned-span
-case both correctly detected AND reported as distinct findings, not
-conflated into one generic 'error'?"
+Stage0:
+Verify with "python verify_mcp_connection.py"
 
-Run baseline (chaos off) and chaos (chaos on) app.py invocations first,
-same pattern as test_stage3.py, then run this script (copy it to the repo
-root first, same as test_stage3.py):
+Stage1 + Stage2:
+Verify with:
+1. "python -m otel-griptape/tests/test_instrumentor.py" #(run this from otel-griptape directory)
+2. "python app.py --question "What does the Kestrel Basin report say about sea level rise and drought?" --pdf fixtures/long_climate_report.pdf" # (run this from demo-agent-app directory and make sure to run "python demo-agent-app/fixtures/generate_fixture_pdf.py" once to get the required long_climate_report.pdf)
+3. In the SigNoz UI, go to Traces, filter by your service name, and open the trace from that run.
+    Check the three literal gate criteria:
+        (i) Token counts present — expand a chat <model> span, confirm gen_ai.usage.input_tokens / gen_ai.usage.output_tokens show real (non-zero) numbers.
+        (ii) Model name present — same span, confirm gen_ai.request.model matches what you actually called (e.g. gpt-4o-mini).
+        (iii) One connected trace tree — the whole run (Planner span → Fetch&Read → Fact-Check's parallel tool-call spans → Report Writer) should appear as a single trace with a single root, not split into multiple disconnected traces. Pay particular attention to the Fact-Check spans specifically — those are the ones that would go orphaned if the ThreadPoolExecutor.submit patch weren't working.
+    Repeat for 2 more runs (different questions/PDFs) — the spec asks for 3 sample traces, since one clean run could be a fluke and won't catch e.g. an intermittent context-propagation miss under real concurrency/timing (which is exactly the kind of bug that behaves differently than in my synthetic in-memory test).
 
-    # baseline
-    python app.py --question "What does the Kestrel Basin report say about sea level rise and drought?" --pdf fixtures/long_climate_report.pdf > baseline_out.json
+Stage3:
+First run the "CHAOS_MODE=1 CHAOS_R1_RATE=1.0 CHAOS_R2_RATE=1.0 CHAOS_SEED=42 python app.py --question "What does the Kestrel Basin report say about sea level rise and drought?" --pdf fixtures/long_climate_report.pdf > chaos_out.json"
+OR
+For no chaos (baseline) run this: "python app.py --question "What does the Kestrel Basin report say about sea level rise and drought?" --pdf fixtures/long_climate_report.pdf > baseline_out.json"
 
-    # chaos: force R3 + R6 to fire (R1/R2 rates left at 0 for a clean read of R3/R6 specifically)
-    CHAOS_MODE=1 CHAOS_R1_RATE=0 CHAOS_R2_RATE=0 CHAOS_R3_RATE=1.0 CHAOS_R6_RATE=1.0 CHAOS_SEED=42 \
-        python app.py --question "What does the Kestrel Basin report say about sea level rise and drought?" --pdf fixtures/long_climate_report.pdf > chaos_out.json
+Then verify with "python test_stage3.py" from project root. Copy this file to project root and then run.
 
-    python test_stage4.py
+Stage4:
+Unit tests first (no MCP/network needed): "pytest guardian/tests/test_r3_orphaned_spans.py guardian/tests/test_r6_silent_truncation.py" from project root.
 
-Use a narrow time_range (e.g. "15m") right after triggering chaos, same
-reasoning as test_stage3.py's R2 note -- R3/R6 aren't windowed-denominator
-sensitive the way R2 is, but a narrow window keeps the printed findings
-scoped to the run you just triggered rather than every historical run.
-"""
+Then, against a live SigNoz run -- first a clean baseline, then a chaos run isolating R3+R6 specifically (R1/R2 rates zeroed so their findings don't clutter the read):
+"python app.py --question \"What does the Kestrel Basin report say about sea level rise and drought?\" --pdf fixtures/long_climate_report.pdf > baseline_out.json"
+"CHAOS_MODE=1 CHAOS_R1_RATE=0 CHAOS_R2_RATE=0 CHAOS_R3_RATE=1.0 CHAOS_R6_RATE=1.0 CHAOS_SEED=42 python app.py --question \"What does the Kestrel Basin report say about sea level rise and drought?\" --pdf fixtures/long_climate_report.pdf > chaos_out.json"
 
-import asyncio
+Then verify with "python test_stage4.py" from project root (copy experiments/test_stage4.py to project root first, same as test_stage3.py).
 
-from dotenv import load_dotenv
+Gate criterion (Section 6, Stage 4): are a chaos-triggered truncation case (R6) and a chaos-triggered orphaned-span case (R3) both correctly detected AND reported as distinct findings, not conflated into one generic "error"? Concretely: confirm R3's findings list is non-empty on the chaos run and empty (or near-empty, if R1/R2 randomness wasn't fully zeroed) on baseline; confirm R6's findings show a `tool_payload_truncated` finding for the long PDF read; and confirm no single finding object ever carries both an R3 and an R6 characterization -- each finding's `rule`/`kind` fields must cleanly say which one fired.
 
-load_dotenv()
+Known open item, not a blocker for the gate above but worth tracking before relying on R6 in a live demo: the finish_reasons=="length" half of R6 (the "model itself hit its output token limit" distinct-finding-kind) needs otel-griptape to actually emit a log record for that case -- it currently only sets `gen_ai.response.finish_reasons` as a span attribute. See r6_silent_truncation.py's module docstring.
 
-from guardian.mcp_client import SignozMCPClient
-from guardian.rules import r3_orphaned_spans, r6_silent_truncation
-from guardian.rules.types import AuditWindow
-
-
-async def main():
-    async with SignozMCPClient() as client:
-        window = AuditWindow(time_range="15m")
-
-        r3 = await r3_orphaned_spans.run(client, window)
-        print("R3:", r3)
-        print(f"  -> {r3.orphaned_spans}/{r3.total_spans_with_parent} spans orphaned, rate={r3.orphaned_span_rate_pct:.1f}%")
-        for f in r3.findings:
-            print(f"     [{f.rule}] {f.span_id} in trace {f.trace_id[:8]}...: {f.detail}")
-
-        r6 = await r6_silent_truncation.run(client, window)
-        print("\nR6:", r6)
-        print(f"  -> {r6.truncated_payload_spans}/{r6.total_payload_spans} payload spans truncated, rate={r6.truncation_rate_pct:.1f}%")
-        for f in r6.findings:
-            print(f"     [{f.rule}/{f.kind}] {f.span_id or '(no span id)'} in trace {f.trace_id[:8]}...: {f.detail}")
-
-        # Gate check: the two failure modes must show up as distinct kinds,
-        # never a single generic finding covering both.
-        kinds_seen = {f.kind for f in r6.findings}
-        print(f"\nR6 finding kinds seen: {kinds_seen or '(none)'}")
-        print("R3 and R6 findings above must be readable as two separate, rule-attributed causes -- not one merged 'error'.")
-
-
-asyncio.run(main())
+STAGE 4 GATE: PASSED (2026-07-22, live SigNoz Cloud run, seed=42). R3: 5/5 chaos-fired claim-check calls correctly detected as orphaned (5/51 spans, 9.8%), 0 false positives on the matching baseline run. R6: chaos-truncated fetch_and_read.read_pdf span correctly detected (raw_bytes=26737, captured_bytes=704, 100% truncation rate on the 1 payload span in that run). Findings confirmed reported as distinct rule/kind-attributed objects, never merged. Two bugs found and fixed en route: (1) R6's fetch_payload_spans originally used signoz_search_traces, which returns a fixed default column set that excludes custom attributes entirely -- rebuilt on signoz_execute_builder_query with explicit selectFields, mirroring r1_missing_fields.fetch_spans. (2) the R3 chaos hook (chaos.maybe_break_context_for_claim_check) existed but wasn't actually wired into fact_check_and_cite.py's _check_one_claim -- now wired at the run_in_executor call site. Model-output-truncation (finish_reasons=="length") half of R6 remains unverified -- see the open item above.

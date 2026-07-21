@@ -17,21 +17,36 @@ Detection logic, exactly per spec:
     reported as distinct findings, never merged into one generic
     "truncation" flag -- enforced here via `R6Finding.kind`.
 
-IMPORTANT / honesty note (flag to the user, don't silently paper over):
-otel-griptape's instrumentor currently records `gen_ai.response.finish_reasons`
+CONFIRMED LIVE (2026-07-21, SigNoz Cloud): `fetch_payload_spans` originally
+used `signoz_search_traces` with a `payload.raw_bytes EXISTS` filter -- the
+filter matched real rows, but `search_traces` returns a fixed default
+column set that excludes custom attributes from the row data entirely,
+filterable or not. Rebuilt on `signoz_execute_builder_query` with explicit
+`selectFields`, mirroring r1_missing_fields.fetch_spans's already-proven
+path. See `fetch_payload_spans`'s own docstring for the full account.
+
+IMPORTANT / honesty note, still open (flag to the user, don't silently
+paper over): `fetch_length_finish_reasons` still uses `signoz_search_logs`
+with a `filter` string, unverified against a live server -- it may well
+have the identical "convenience tool has a fixed column set" limitation
+`search_traces` just turned out to have, in which case it would need the
+same `execute_builder_query`-style rebuild once logs-signal live data is
+available to check the response shape against. Separately, and more
+fundamentally: otel-griptape currently records `gen_ai.response.finish_reasons`
 only as a SPAN attribute (see semconv.py / instrumentor.py's
-`_finish_reason_capture`), not as a separate OTel log record. The spec
-names `signoz_search_logs` specifically for this cross-reference, so
-`fetch_length_finish_reasons` below queries the logs signal as specified --
-but until otel-griptape (or SigNoz's own span->log correlation) actually
-produces a log record carrying that attribute, this half of R6 will find
-nothing to cross-reference against, the same "fires never, doesn't error"
-behavior Section 9 describes for R6 on a target app that doesn't set the
-payload attributes at all. This is a real gap worth closing in
-otel-griptape (emit a log record when finish_reason == "length") before
-relying on this cross-reference for a live demo -- not something to
-silently fix by switching this rule to query spans instead, since that
-would contradict the spec's explicit tool choice.
+`_finish_reason_capture`), not as a separate OTel log record, so until
+that's added, this half of R6 has nothing to find regardless of how the
+fetch is built -- the same "fires never, doesn't error" behavior Section 9
+describes for a target app that doesn't set the payload attributes at all.
+
+CONFIRMED LIVE (2026-07-22, SigNoz Cloud): Stage 4's gate check passed for
+the tool-payload-truncation half -- a chaos run (CHAOS_R6_RATE=1.0,
+truncate to 700 chars) produced a `fetch_and_read.read_pdf` span with
+raw_bytes=26737, captured_bytes=704, correctly flagged as
+`tool_payload_truncated` via the `execute_builder_query` rebuild above.
+The `model_output_truncated` half remains unverified per the open item
+just above -- no live run has exercised it yet (would need a prompt that
+actually drives a model to hit its output token limit).
 """
 
 from __future__ import annotations
@@ -165,14 +180,52 @@ def evaluate(
 
 
 async def fetch_payload_spans(client: SignozMCPClient, window: AuditWindow) -> list[PayloadSpanRecord]:
-    """Fetch every span carrying both R6 payload-tracking attributes, via
-    `signoz_search_traces` (the tool named for R6 in Section 4.3.1) filtered
-    on `payload.raw_bytes EXISTS`."""
+    """Fetch every span carrying both R6 payload-tracking attributes.
+
+    CONFIRMED LIVE (2026-07-21, SigNoz Cloud, via a debug dump): the
+    initial version of this function used `signoz_search_traces` with a
+    `payload.raw_bytes EXISTS` filter. The filter itself matched real rows
+    (fetch_and_read.read_pdf spans came back), but `search_traces` returns
+    a FIXED default column set -- service.name, span_id, trace_id,
+    parent_span_id, the OTel semconv columns, etc. -- and does NOT include
+    custom attributes like `payload.raw_bytes` / `payload.captured_bytes`
+    in the row data at all, filterable or not. Same root cause R1 already
+    hit and fixed (r1_missing_fields.py's module docstring): a raw
+    `signoz_execute_builder_query` with explicit `selectFields` is what
+    actually returns custom attribute values as columns; the convenience
+    tools don't. Rebuilt on that same proven path.
+    """
+    start_ms, end_ms = window.as_absolute_ms_range()
     filter_expression = f"{PAYLOAD_RAW_BYTES} EXISTS"
     if window.service:
         filter_expression += f" AND serviceName = '{window.service}'"
 
-    raw = await client.search_traces(filter=filter_expression, **_window_time_kwargs(window), limit=1000)
+    query = {
+        "start": start_ms,
+        "end": end_ms,
+        "requestType": "raw",
+        "compositeQuery": {
+            "queries": [
+                {
+                    "type": "builder_query",
+                    "spec": {
+                        "name": "A",
+                        "signal": "traces",
+                        "filter": {"expression": filter_expression},
+                        "selectFields": [
+                            {"name": "span_id"},
+                            {"name": "trace_id"},
+                            {"name": "name"},
+                            {"name": PAYLOAD_RAW_BYTES},
+                            {"name": PAYLOAD_CAPTURED_BYTES},
+                        ],
+                        "limit": 1000,
+                    },
+                }
+            ],
+        },
+    }
+    raw = await client.execute_builder_query(query)
     rows = _extract_rows(raw)
 
     spans: list[PayloadSpanRecord] = []

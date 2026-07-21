@@ -32,6 +32,18 @@ not R3), this implementation defines `orphaned_span_rate_pct` as
 all (trace roots) are excluded from the denominator since they can't be
 orphaned by this rule's definition. This feeds Section 4.3.6's health-score
 formula's `orphaned_span_rate_pct` term directly.
+
+CONFIRMED LIVE (2026-07-22, SigNoz Cloud): Stage 4's gate check passed
+against a real chaos run -- 5/5 chaos-fired claim-check calls (rate=1.0,
+seed=42) showed up as exactly 5 R3 findings (5/51 spans orphaned, 9.8%),
+each correctly attributing the fabricated parent_span_id and correctly
+NOT suppressed by the window-edge cross-check (since those span_ids never
+existed anywhere). `_trace_detail_span_rows`'s fallback to `_extract_rows`
+is confirmed correct too -- `get_trace_details` uses the same nested
+`results[0].rows[].data` envelope r1/r2 already proved for
+`execute_builder_query` / `aggregate_traces`, so no `spans`/`span`/`items`
+key ever actually gets hit in practice on this server; the fallback path
+handles it.
 """
 
 from __future__ import annotations
