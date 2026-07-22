@@ -53,3 +53,10 @@ Then, against live SigNoz + live LLM providers (needs OPENAI_API_KEY and a local
 Gate criterion (Section 6, Stage 5): does the same rule-engine output produce a content-equivalent, coherent natural-language report under both LLM_PROVIDER=openai and LLM_PROVIDER=ollama? "Content-equivalent" means: both reports name the same rule IDs and the same offending spans/attributes, and correctly keep R3 findings distinct from R6 findings (per Section 4.3.2's explicit requirement, carried over from 4.3.1) -- word-for-word identical text is not required and not expected. test_stage5.py's validate_citations check on each report is a mechanical proxy for part of this (did the report name every rule that actually fired), but the real content-equivalence comparison between the two providers' reports needs a human read of both printed reports.
 
 NOTE: OpenAI is tested but Ollama still needs to tested in future for any errors.
+
+
+Stage6:
+python scripts/provision_dashboards.py --dry-run
+python scripts/provision_dashboards.py
+Go to https://webhook.site and get the URL provided by it.
+python test_stage6.py --provision-alerts --webhook-url https://webhook.site/<id_by_this_site>

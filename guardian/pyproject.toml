@@ -12,6 +12,8 @@ dependencies = [
     "mcp>=1.0.0",
     "python-dotenv>=1.0.1",
     "litellm>=1.60.0",
+    "opentelemetry-sdk>=1.24.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.24.0",
 ]
 
 [project.optional-dependencies]

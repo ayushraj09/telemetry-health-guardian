@@ -5,6 +5,12 @@ python-dotenv>=1.0.1
 # Stage 5 — LLM Reasoning Layer + dual provider (Section 4.3.3)
 litellm>=1.60.0
 
+# Stage 6 — Write-back + Dashboards + Alerts (Section 4.3.5/4.4/4.5)
+# opentelemetry-sdk is already pulled in transitively via -e ../otel-griptape,
+# listed explicitly here since guardian/writeback.py imports it directly.
+opentelemetry-sdk>=1.24.0
+opentelemetry-exporter-otlp-proto-http>=1.24.0
+
 # test-only
 pytest>=8.0.0
 pytest-asyncio>=0.24.0
