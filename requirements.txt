@@ -7,3 +7,10 @@ python-dotenv>=1.0.1
 
 # Stage 5 — LLM Reasoning Layer + dual provider (Section 4.3.3)
 litellm>=1.60.0
+
+# Stage 7 — Orchestration + Frontend (Section 4.3.5, 4.6)
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+apscheduler>=3.10.4
+streamlit>=1.38.0
+requests>=2.32.0

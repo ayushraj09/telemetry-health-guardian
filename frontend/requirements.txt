@@ -1,0 +1,5 @@
+# Stage 7 — Frontend (Section 4.6). Talks to guardian/main.py's FastAPI
+# backend over plain HTTP; no direct MCP/SigNoz/LLM dependency here.
+streamlit>=1.38.0
+requests>=2.32.0
+python-dotenv>=1.0.1
