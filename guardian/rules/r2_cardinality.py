@@ -30,6 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from guardian.mcp_client import SignozMCPError
 from guardian.rules.r1_missing_fields import _extract_rows
 from guardian.rules.types import AuditWindow
 
@@ -132,6 +133,15 @@ def evaluate(stats: list[FieldValueStats]) -> R2Result:
 
 _EXCLUDED_KEY_SUBSTRINGS = ("trace_id", "span_id", "traceId", "spanId")
 
+# SigNoz reserved/computed trace fields -- signoz_get_field_keys returns
+# these alongside real gen_ai.*/payload.* attribute keys, but
+# signoz_execute_builder_query's selectFields rejects them outright
+# ("isRoot and isEntryPoint fields are not supported in selectFields",
+# confirmed live 2026-07-23). They're boolean flags SigNoz computes from
+# trace structure, not span attributes with content to sample anyway, so
+# skipping them up front is correct, not just a workaround.
+_RESERVED_KEY_NAMES = frozenset({"isRoot", "isEntryPoint"})
+
 
 async def fetch_field_stats(
     client: SignozMCPClient,
@@ -179,8 +189,22 @@ async def fetch_field_stats(
             # exists to avoid -- skip querying them entirely rather than
             # relying on the byte-length half of the check alone.
             continue
+        
+        if key in _RESERVED_KEY_NAMES:
+            # SigNoz-reserved computed fields -- see _RESERVED_KEY_NAMES.
+            continue
 
-        values = await _fetch_raw_field_values(client, window, key)
+        try:
+            values = await _fetch_raw_field_values(client, window, key)
+        except SignozMCPError:
+            # A key signoz_get_field_keys returned but selectFields
+            # rejects for some other reserved/internal reason we haven't
+            # named yet -- skip it rather than crash the whole audit over
+            # one unrecognized field. R2 not evaluating one such key is
+            # the same "fires never, doesn't error" degradation the spec
+            # already accepts elsewhere (Section 9), not silent data loss
+            # on the keys this rule actually cares about.
+            continue
         if not values:
             continue
 

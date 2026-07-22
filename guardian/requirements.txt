@@ -2,6 +2,9 @@
 mcp>=1.0.0
 python-dotenv>=1.0.1
 
+# Stage 5 — LLM Reasoning Layer + dual provider (Section 4.3.3)
+litellm>=1.60.0
+
 # test-only
 pytest>=8.0.0
 pytest-asyncio>=0.24.0

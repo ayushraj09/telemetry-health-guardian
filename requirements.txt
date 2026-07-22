@@ -1,6 +1,9 @@
 # Stage 0 — MCP connection verification only.
-# More dependencies (opentelemetry-*, griptape, fastapi, apscheduler, litellm,
+# More dependencies (opentelemetry-*, griptape, fastapi, apscheduler,
 # streamlit, etc.) get added stage by stage as those components are built —
 # see BUILD-SPEC.md Section 6.
 mcp>=1.9.0
 python-dotenv>=1.0.1
+
+# Stage 5 — LLM Reasoning Layer + dual provider (Section 4.3.3)
+litellm>=1.60.0
