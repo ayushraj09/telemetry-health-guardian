@@ -62,3 +62,37 @@ Go to https://webhook.site and get the URL provided by it.
 python test_stage6.py --provision-alerts --webhook-url https://webhook.site/<id_by_this_site>
 
 Stage7: see stage7_notes.txt in this same directory.
+
+Stage8:
+New files: README.md (repo root -- leads with Section 1's framing, "an
+auditor for telemetry hygiene," before any architecture detail, per Stage
+8's instruction), docs/WRITEUP.md (what was built, what wasn't and why,
+framework-choice rationale, known limitations), docs/REHEARSAL.md (operator
+checklist walking Section 8's seven numbered checks end-to-end using the
+existing test_stage7.py driver plus Stage 6's provisioning/alert scripts --
+no new verification code, since every command it calls was already built
+and gate-checked at its own stage). No changes to guardian/, otel-griptape/,
+demo-agent-app/, or frontend/ -- Stage 8 per Section 6 is polish + write-up
++ rehearsal, not new functionality.
+
+Two pre-existing path deviations from Section 5's canonical layout were
+noticed and documented (not silently fixed) at this stage: verify_mcp_
+connection.py lives at the repo root instead of under scripts/, and
+provision_dashboards.py lives under guardian/scripts/ instead of a
+top-level scripts/. Moving them now would require updating every earlier
+stage's recorded verification commands in this file for a cosmetic-only
+change, so both are called out explicitly in README.md's Repository Layout
+section instead.
+
+Before a live demo or final submission recording, run through
+docs/REHEARSAL.md once end-to-end on a clean SigNoz project and record the
+outcome here (date, project, chaos seed, which of the seven Section 8
+checks passed cleanly vs. needed a rerun) -- same discipline as every
+earlier stage's "STAGE N GATE: ..." line above. That live pass was not run
+as part of producing these Stage 8 files themselves (per this document's
+own top-level instruction: code files are handed over directly rather than
+executed against the live MCP/SigNoz stack from here).
+
+STAGE 8: polish artifacts delivered (README.md, docs/WRITEUP.md,
+docs/REHEARSAL.md). Live rehearsal sign-off still pending -- see the
+"Sign-off" section at the end of docs/REHEARSAL.md.

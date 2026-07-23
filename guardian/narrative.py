@@ -193,19 +193,66 @@ def build_prompt(findings: AuditFindings) -> str:
     )
 
 
+def _fired_rule_ids(findings: AuditFindings) -> list[str]:
+    """Which rule IDs have >=1 finding, in canonical order. Shared by
+    `build_chat_prompt` (to state the required-coverage list explicitly)
+    and `validate_citations` (to check the model actually met it)."""
+    fired = [
+        rule_id
+        for rule_id, result in (
+            ("R1", findings.r1),
+            ("R2", findings.r2),
+            ("R3", findings.r3),
+            ("R6", findings.r6),
+        )
+        if getattr(result, "findings", ())
+    ]
+    if findings.r7 is not None and getattr(findings.r7, "findings", ()):
+        fired.append("R7")
+    return fired
+
+
 def build_chat_prompt(findings: AuditFindings, question: str) -> str:
     """Pure prompt construction for the free-form chat case (Section
     4.3.2's "answers to free-form chat questions"). Same grounding + same
     citation requirement as `build_prompt`, phrased as a question-answer
-    task instead of a standing report."""
+    task instead of a standing report.
+
+    Design decision (documented, not silent): causal questions like "why
+    did the score drop?" invite the model to reach for the single most
+    severe finding and stop there -- observed in practice, where a chat
+    answer covered only R6 (the most urgent rule per the standing report)
+    and silently dropped R1/R2/R3 even though all four fired. Naming the
+    exact required rule ID list below, computed from the same findings
+    data rather than left for the model to infer, closes that gap: the
+    model can't reach "just the worst one" as a good-faith reading of an
+    explicit checklist the way it can with an open-ended instruction to
+    "ground your answer in the JSON."
+    """
     payload = json.dumps(findings.to_json_dict(), indent=2, default=str)
+    fired = _fired_rule_ids(findings)
+    if fired:
+        coverage_instruction = (
+            f"The following rules fired this audit and have at least one finding: "
+            f"{', '.join(fired)}. Your answer MUST mention every one of these rule "
+            "IDs at least once, even if the question seems to point at only one "
+            "issue -- multiple distinct problems can all contribute to the same "
+            "score drop, and omitting any of them is an incomplete answer. Do not "
+            "silently focus on only the most severe rule."
+        )
+    else:
+        coverage_instruction = (
+            "No rules fired this audit (all findings lists are empty) -- say so "
+            "plainly rather than inventing an issue."
+        )
     return (
         f"Rule engine findings for service {findings.service or '(all services)'}:\n\n"
         f"```json\n{payload}\n```\n\n"
         f"Answer this question about the findings above: {question}\n\n"
         "Ground your answer only in the JSON given -- name the specific rule "
         "ID(s) and span/attribute(s) involved. If the JSON doesn't contain "
-        "enough information to answer, say so plainly instead of guessing."
+        "enough information to answer, say so plainly instead of guessing.\n\n"
+        f"{coverage_instruction}"
     )
 
 
@@ -231,17 +278,4 @@ def validate_citations(narrative: str, findings: AuditFindings) -> list[str]:
     A non-empty list is a signal a caller can log or retry the generation
     on -- not proof the narrative is wrong (one sentence can legitimately
     cover several findings from the same rule)."""
-    fired_rule_ids = [
-        rule_id
-        for rule_id, result in (
-            ("R1", findings.r1),
-            ("R2", findings.r2),
-            ("R3", findings.r3),
-            ("R6", findings.r6),
-        )
-        if getattr(result, "findings", ())
-    ]
-    if findings.r7 is not None and getattr(findings.r7, "findings", ()):
-        fired_rule_ids.append("R7")
-
-    return [rule_id for rule_id in fired_rule_ids if rule_id not in narrative]
+    return [rule_id for rule_id in _fired_rule_ids(findings) if rule_id not in narrative]
