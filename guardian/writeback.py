@@ -84,6 +84,7 @@ METRIC_MISSING_FIELD_RATE = "telemetry.missing_field_rate_pct"
 METRIC_CARDINALITY_RISK = "telemetry.cardinality_risk_score"
 METRIC_ORPHANED_RATE = "telemetry.orphaned_span_rate_pct"
 METRIC_TRUNCATION_RATE = "telemetry.truncation_rate_pct"
+METRIC_CROSS_SERVICE_BREAK_RATE = "telemetry.cross_service_break_rate_pct"
 
 _DEFAULT_EXPORT_INTERVAL_MS = 15_000  # see HealthWriteback docstring
 
@@ -144,6 +145,7 @@ class HealthWriteback:
         self._cardinality_risk: dict[tuple[str, ...], float] = {}
         self._orphaned_rate: dict[tuple[str, ...], float] = {}
         self._truncation_rate: dict[tuple[str, ...], float] = {}
+        self._cross_service_break_rate: dict[tuple[str, ...], float] = {}
 
         metric_exporter = OTLPMetricExporter(
             endpoint=_otlp_endpoint("/v1/metrics"), headers=headers
@@ -183,6 +185,17 @@ class HealthWriteback:
             callbacks=[self._gauge_callback(self._truncation_rate, ("service.name", "tool"))],
             unit="1",
             description="R6 truncation rate (%), overall (tool='_all_') and per truncated tool.",
+        )
+        meter.create_observable_gauge(
+            METRIC_CROSS_SERVICE_BREAK_RATE,
+            callbacks=[
+                self._gauge_callback(self._cross_service_break_rate, ("caller_service", "callee_service"))
+            ],
+            unit="1",
+            description=(
+                "R7 cross-service handoff break rate (%) per caller/callee service pair "
+                "-- traceparent not propagated across an outbound HTTP call."
+            ),
         )
 
         log_exporter = OTLPLogExporter(endpoint=_otlp_endpoint("/v1/logs"), headers=headers)
@@ -232,6 +245,21 @@ class HealthWriteback:
         for f in findings.r6.findings:
             self._truncation_rate[(service, f.span_name)] = 100.0
             self._emit_log(service, "ERROR", f.rule, f.kind, f.detail, f.span_id, f.trace_id)
+
+        r7 = getattr(findings, "r7", None)
+        if r7 is not None:
+            self._cross_service_break_rate[(service, "_all_")] = r7.cross_service_break_rate_pct
+            for f in r7.findings:
+                self._cross_service_break_rate[(f.caller_service, f.callee_service)] = 100.0
+                self._emit_log(
+                    service,
+                    "ERROR",
+                    f.rule,
+                    None,
+                    f.detail,
+                    f.caller_span_id,
+                    f.caller_trace_id,
+                )
 
     def _emit_log(
         self,
@@ -518,13 +546,11 @@ def _anomaly_rule_payload(
 
 
 async def ensure_alerts(client: SignozMCPClient, channel_name: str) -> dict[str, str]:
-    """Creates the three alerts required by Section 4.5 via
-    `signoz_create_alert` (the fourth, R7's cross-service break-rate alert,
-    is explicitly Stage-7-only and not created here). Returns
-    `{alert_name: ruleId}`. Called once at Guardian startup -- per spec,
-    "created programmatically via MCP at startup," not on every audit
-    cycle; a future `main.py` should call this once, not from inside
-    `scheduler.py`'s per-cycle loop.
+    """Creates the four alerts required by Section 4.5 via
+    `signoz_create_alert`. Returns `{alert_name: ruleId}`. Called once at
+    Guardian startup -- per spec, "created programmatically via MCP at
+    startup," not on every audit cycle; a future `main.py` should call
+    this once, not from inside `scheduler.py`'s per-cycle loop.
 
     `channel_name` (renamed from `channel_id` 2026-07-22): this is the
     notification channel's NAME, not its UUID -- see
@@ -555,6 +581,14 @@ async def ensure_alerts(client: SignozMCPClient, channel_name: str) -> dict[str,
             target=5.0,
             channel_name=channel_name,
             group_by=["service.name", "tool"],
+        ),
+        "guardian-cross-service-break-any-occurrence": _threshold_rule_payload(
+            alert_name="Cross-service handoff break detected",
+            metric_name=METRIC_CROSS_SERVICE_BREAK_RATE,
+            comparison="above",
+            target=0.0,
+            channel_name=channel_name,
+            group_by=["caller_service", "callee_service"],
         ),
     }
     rule_ids: dict[str, str] = {}

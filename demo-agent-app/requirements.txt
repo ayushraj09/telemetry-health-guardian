@@ -8,5 +8,12 @@ opentelemetry-exporter-otlp-proto-http>=1.24.0
 # inside this directory (demo-agent-app/) so this relative path resolves.
 -e ../otel-griptape
 
+# Stage 8 (R7): citation_service.py is its own standalone FastAPI/uvicorn
+# process, and fact_check_and_cite.py's _fetch_citation calls it over real
+# outbound HTTP -- see both files' module docstrings.
+fastapi>=0.110.0
+uvicorn>=0.29.0
+httpx>=0.27.0
+
 # Only needed once, to regenerate fixtures/long_climate_report.pdf
 reportlab>=4.0.0

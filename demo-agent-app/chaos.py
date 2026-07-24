@@ -11,8 +11,8 @@ logic -- it mimics how a real telemetry regression would actually show up
 (something between the SDK and the exporter misbehaving), not a rewrite of
 the instrumentation code itself.
 
-Implements the Stage 3 and Stage 4 rules, per the build spec's own stage
-order (Section 6):
+Implements the Stage 3, Stage 4, and Stage 8 rules, per the build spec's
+own stage order (Section 6):
   - R1: skip a token-usage field on some spans
   - R2: tag a span with raw extracted document text as an INDEXED attribute
         (instead of otel-griptape's correct event-based capture, Section 4.2)
@@ -24,10 +24,9 @@ order (Section 6):
   - R6: truncate the text placed into context when reading a long PDF to a
         fixed small slice, while still recording the true full extracted
         size -- see `maybe_truncate_for_context`.
-
-R7's trigger is NOT implemented here yet -- it also needs
-citation_service.py to exist first, which is Stage 7's job. No stub
-function for it is added now, same discipline the spec applies to R5.
+  - R7: call `citation_service.py` without forwarding the W3C `traceparent`
+        header on one fetch_check_and_cite.py claim's citation-fetch call --
+        see `maybe_drop_traceparent_for_citation_call`'s own docstring.
 
 Usage:
     CHAOS_MODE=1 python app.py --question "..." --pdf fixtures/long_climate_report.pdf
@@ -56,6 +55,13 @@ Env vars:
                           to. Default 700 -- matches Section 2's canonical
                           R6 example verbatim ("the agent only sees the
                           first 700 characters").
+    CHAOS_R7_RATE         float 0-1, probability a given Fact-Check & Cite
+                          claim's outbound HTTP call to citation_service.py
+                          gets sent with NO traceparent header. Default
+                          0.5 -- same reasoning as CHAOS_R3_RATE: not 1.0,
+                          so some handoffs in the same run stay correctly
+                          connected, making the break visibly one severed
+                          branch rather than every call looking broken.
     CHAOS_SEED            optional int, for a reproducible run.
 
 IMPORTANT -- R2 verification caveat (tell the user, don't silently work
@@ -92,6 +98,7 @@ _r2_rate = 0.0
 _r3_rate = 0.0
 _r6_rate = 0.0
 _r6_truncate_chars = 700
+_r7_rate = 0.0
 _r1_decisions: dict[int, str | None] = {}
 
 
@@ -121,7 +128,7 @@ def install_chaos() -> None:
     possible in app.py -- before otel_griptape.instrument() and before
     run_pipeline() -- since this patches the SDK Span class globally, not
     a specific tracer/provider instance."""
-    global _installed, _original_set_attribute, _rng, _r1_rate, _r2_rate, _r3_rate, _r6_rate, _r6_truncate_chars
+    global _installed, _original_set_attribute, _rng, _r1_rate, _r2_rate, _r3_rate, _r6_rate, _r6_truncate_chars, _r7_rate
 
     if not is_enabled():
         return
@@ -135,6 +142,7 @@ def install_chaos() -> None:
     _r3_rate = _env_float("CHAOS_R3_RATE", 0.3)
     _r6_rate = _env_float("CHAOS_R6_RATE", 1.0)
     _r6_truncate_chars = int(_env_float("CHAOS_R6_TRUNCATE_CHARS", 700))
+    _r7_rate = _env_float("CHAOS_R7_RATE", 0.5)
 
     _original_set_attribute = SDKSpan.set_attribute
     SDKSpan.set_attribute = _chaos_set_attribute  # type: ignore[method-assign]
@@ -142,7 +150,8 @@ def install_chaos() -> None:
 
     print(
         f"[chaos] installed -- R1 rate={_r1_rate}, R2 rate={_r2_rate}, R3 rate={_r3_rate}, "
-        f"R6 rate={_r6_rate} (truncate to {_r6_truncate_chars} chars), seed={seed or 'random'}"
+        f"R6 rate={_r6_rate} (truncate to {_r6_truncate_chars} chars), R7 rate={_r7_rate}, "
+        f"seed={seed or 'random'}"
     )
 
 
@@ -278,3 +287,30 @@ def maybe_truncate_for_context(text: str) -> str:
     return text[:_r6_truncate_chars]
 
 
+# --- R7: drop the traceparent header on an outbound service-to-service call -
+
+def maybe_drop_traceparent_for_citation_call() -> bool:
+    """Call this from fact_check_and_cite.py's `_fetch_citation`,
+    immediately before injecting the W3C `traceparent` header into the
+    outbound HTTP request to `citation_service.py`. Returns `True` when
+    chaos fires for this call -- the caller must then send the request
+    WITHOUT a traceparent header, so the receiving citation_service.py
+    span has nothing to extract and starts as a new, disconnected trace
+    root instead of a continuation of the caller's trace. This is R7's
+    exact failure mode (Section 2: "the W3C traceparent header isn't
+    propagated, one trace silently becomes two disconnected ones").
+    Returns `False` when chaos is off or this call didn't win the R7 dice
+    roll -- the caller injects the header normally via
+    `otel_griptape.context_propagation.inject_traceparent_header`, the
+    already-correct "do it right" mechanism (Section 4.2).
+
+    Design note, same shape as `maybe_break_context_for_claim_check`'s:
+    this only ever affects the OUTBOUND REQUEST's headers, never
+    otel-griptape's own context-propagation code -- chaos stays strictly
+    outside both otel-griptape's and demo-agent-app's real instrumentation
+    logic (see module docstring), it just chooses, per call, whether the
+    correct mechanism gets used or skipped.
+    """
+    if not _installed or _rng is None:
+        return False
+    return _rng.random() < _r7_rate

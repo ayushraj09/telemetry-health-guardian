@@ -216,6 +216,25 @@ class SignozMCPClient:
     async def execute_builder_query(self, query: dict[str, Any]) -> Any:
         return await self.call_tool("signoz_execute_builder_query", {"query": query})
 
+    async def list_services(
+        self,
+        time_range: str | None = None,
+        start: int | None = None,
+        end: int | None = None,
+    ) -> Any:
+        """Needed by R7 (Section 4.3.1) to enumerate every known service
+        before walking ordered service pairs for cross-service handoff
+        breaks. Parameter names mirrored from the other time-scoped tools
+        above -- same honesty caveat as `search_logs`: the
+        signoz-mcp-server README's `signoz_list_services` entry wasn't
+        available to check directly from this environment, so this needs
+        the same live confirmation before trusting it for Stage 8's gate
+        check."""
+        return await self.call_tool(
+            "signoz_list_services",
+            {"timeRange": time_range, "start": start, "end": end},
+        )
+
     async def search_traces(
         self,
         filter: str | None = None,  # noqa: A002

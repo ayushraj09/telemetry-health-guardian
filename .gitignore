@@ -5,7 +5,6 @@ telemetry-health-guardian-BUILD-SPEC.md
 stage1_output.txt
 stage1_chaos_output.txt
 *.pdf
-*.json
 # Ignore all __pycache__ folders recursively
 **/__pycache__/
 

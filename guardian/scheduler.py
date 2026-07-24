@@ -3,7 +3,7 @@
 This module owns two things:
 
 1. `run_audit_cycle` / `AuditStore` -- the ONE orchestration path that
-   fetches R1/R2/R3(/R7 once built) via MCP, combines them, scores them,
+   fetches R1/R2/R3/R6/R7 via MCP, combines them, scores them,
    generates the LLM narrative, and (optionally) writes back to SigNoz.
    This is the exact sequence `experiments/test_stage6.py`'s
    `run_audit_and_writeback` already proved live at the Stage 6 gate --
@@ -47,7 +47,13 @@ from apscheduler.triggers.interval import IntervalTrigger
 from guardian.health_score import HealthScoreResult, compute_health_score
 from guardian.mcp_client import SignozMCPClient
 from guardian.narrative import AuditFindings, combine_results, generate_report
-from guardian.rules import r1_missing_fields, r2_cardinality, r3_orphaned_spans, r6_silent_truncation
+from guardian.rules import (
+    r1_missing_fields,
+    r2_cardinality,
+    r3_orphaned_spans,
+    r6_silent_truncation,
+    r7_cross_service_breaks,
+)
 from guardian.rules.types import AuditWindow
 from guardian.writeback import HealthWriteback
 
@@ -110,7 +116,7 @@ async def run_audit_cycle(
     generate_narrative: bool = True,
     time_range: str | None = None,
 ) -> AuditCycleResult:
-    """Run one full R1+R2+R3+R6 audit for `service` (`None` = all services,
+    """Run one full R1+R2+R3+R6+R7 audit for `service` (`None` = all services,
     same semantics `AuditWindow`/every rule module already use), score it,
     narrate it, optionally write it back to SigNoz, cache it in `store`,
     and return it.
@@ -128,8 +134,9 @@ async def run_audit_cycle(
         r2 = await r2_cardinality.run(client, window)
         r3 = await r3_orphaned_spans.run(client, window)
         r6 = await r6_silent_truncation.run(client, window)
+        r7 = await r7_cross_service_breaks.run(client, window)
 
-    findings = combine_results(service=service, r1=r1, r2=r2, r3=r3, r6=r6)
+    findings = combine_results(service=service, r1=r1, r2=r2, r3=r3, r6=r6, r7=r7)
     health = compute_health_score(findings)
 
     narrative_text: str | None = None
@@ -149,13 +156,14 @@ async def run_audit_cycle(
     )
     await store.set(service, result)
     logger.info(
-        "Audit cycle complete for service=%r: score=%.1f, findings=R1:%d/R2:%d/R3:%d/R6:%d",
+        "Audit cycle complete for service=%r: score=%.1f, findings=R1:%d/R2:%d/R3:%d/R6:%d/R7:%d",
         service,
         health.score,
         len(r1.findings),
         len(r2.findings),
         len(r3.findings),
         len(r6.findings),
+        len(r7.findings),
     )
     return result
 

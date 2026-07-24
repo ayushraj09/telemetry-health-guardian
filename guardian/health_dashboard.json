@@ -1,0 +1,63 @@
+{
+  "_format_note": "This is NOT a raw SigNoz dashboard payload -- it's a small internal panel spec that scripts/provision_dashboards.py translates into a real signoz_create_dashboard call (title/description/tags/layout/widgets). Kept separate from the SigNoz-native JSON shape (widget UUIDs, grid x/y/w/h, panelTypes strings, etc.) because that full schema wasn't confirmed live from this environment -- see provision_dashboards.py's module docstring. Every panel here reads one of the five metrics guardian/writeback.py's HealthWriteback class emits via OTLP (Section 4.4's table, adapted per writeback.py's design-decision note: panels read our own materialized metrics rather than re-deriving R1-R7's detection logic as raw trace-tree queries).",
+  "title": "Telemetry Health Guardian",
+  "description": "Auditor for telemetry hygiene -- per-service health score plus the R1/R2/R3/R6/R7 signals behind it. Not a replacement for SigNoz's own APM/trace views (Section 4.6).",
+  "tags": ["telemetry-health-guardian"],
+  "panels": [
+    {
+      "id": "health_score_timeseries",
+      "title": "Telemetry Health Score",
+      "panel_type": "graph",
+      "metric_name": "telemetry.health_score",
+      "group_by": ["service.name"],
+      "unit": "percent"
+    },
+    {
+      "id": "missing_field_rate",
+      "title": "Missing-Field Rate (%) by Service",
+      "panel_type": "graph",
+      "metric_name": "telemetry.missing_field_rate_pct",
+      "group_by": ["service.name"],
+      "unit": "percent"
+    },
+    {
+      "id": "cardinality_risk_table",
+      "title": "Cardinality Risk Table",
+      "panel_type": "table",
+      "metric_name": "telemetry.cardinality_risk_score",
+      "group_by": ["service.name", "field_key"],
+      "unit": "percent"
+    },
+    {
+      "id": "orphaned_span_trend",
+      "title": "Orphaned Span Trend",
+      "panel_type": "graph",
+      "metric_name": "telemetry.orphaned_span_rate_pct",
+      "group_by": ["service.name"],
+      "unit": "percent"
+    },
+    {
+      "id": "silent_truncation_rate",
+      "title": "Silent Truncation Rate",
+      "panel_type": "graph",
+      "metric_name": "telemetry.truncation_rate_pct",
+      "group_by": ["service.name", "tool"],
+      "unit": "percent"
+    },
+    {
+      "id": "cross_service_break_rate",
+      "title": "Cross-Service Break Rate",
+      "panel_type": "graph",
+      "metric_name": "telemetry.cross_service_break_rate_pct",
+      "group_by": ["caller_service", "callee_service"],
+      "unit": "percent"
+    }
+  ],
+  "promql_vs_builder_comparison": {
+    "id": "promql_vs_builder",
+    "title": "Health Score -- PromQL vs Builder Query",
+    "metric_name": "telemetry.health_score",
+    "group_by": ["service.name"],
+    "note": "Two side-by-side widgets over the same metric: one built as a builder_query, one as a promql query. OTel dotted metric names need the Prometheus 3.x UTF-8 quoted-selector form, e.g. avg by (service_name) ({\"telemetry.health_score\"}) -- see signoz://promql/instructions per the signoz-mcp-server README."
+  }
+}

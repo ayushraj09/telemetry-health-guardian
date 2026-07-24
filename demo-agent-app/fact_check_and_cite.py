@@ -13,27 +13,42 @@ break if not done correctly.
 Stage 1 (here) does not yet manually fix or break context propagation
 across those threads — that correctness is otel-griptape's job in Stage 2.
 Stage 4's chaos.py explicitly severs it on top of the now-correct baseline.
+
+Stage 8 addition (R7): the verdict check itself stays in-process (unchanged
+from Stage 1/4 — this is not what R7 is about), but the citation for each
+claim is now fetched from `citation_service.py`, a SEPARATE HTTP service,
+over a real outbound request. That real service-to-service hop is what
+gives R7 (Section 4.3.1) something to check: whether the W3C `traceparent`
+header survives the call, keeping one claim's fact-check trace and its
+citation-lookup trace as a single connected trace instead of silently
+becoming two. `chaos.py`'s R7 trigger (`maybe_drop_traceparent_for_citation_call`)
+decides, per call, whether that header actually gets sent.
 """
 
 import asyncio
 import json
+import os
 import re
 
+import httpx
 from griptape.structures import Agent
 from opentelemetry import context as otel_context
 from opentelemetry import trace
 
 import chaos
+from otel_griptape.context_propagation import inject_traceparent_header
 
 tracer = trace.get_tracer(__name__)
+
+CITATION_SERVICE_URL = os.getenv("CITATION_SERVICE_URL", "http://localhost:8100")
+CITATION_SERVICE_TIMEOUT_SECONDS = float(os.getenv("CITATION_SERVICE_TIMEOUT_SECONDS", "15.0"))
 
 CLAIM_CHECK_PROMPT = """You are the fact-checking stage of a document research pipeline.
 Given a claim and source text, respond with ONLY a JSON object (no prose, no
 markdown fences) of the form:
 
 {{
-  "verdict": "supported" | "unsupported" | "unclear",
-  "citation": "<short quote or paraphrase from the source text that justifies the verdict, or empty string if unclear>"
+  "verdict": "supported" | "unsupported" | "unclear"
 }}
 
 Claim: {claim}
@@ -80,7 +95,53 @@ async def _check_one_claim(claim: str, source_text: str) -> dict:
                 otel_context.detach(token)
 
         span.set_attribute("claim.verdict", result["verdict"])
+
+        # Stage 8 (R7): the citation itself now comes from a real outbound
+        # HTTP call to citation_service.py, a separate service -- see this
+        # module's docstring for why. This call happens on the SAME ambient
+        # context this span establishes (not inside the chaos-corrupted R3
+        # window above, and not inside the thread-pool executor), so a
+        # normal run propagates a clean, correctly-parented trace context
+        # into it; only chaos.py's independent R7 trigger below decides
+        # whether the traceparent header actually goes out.
+        result["citation"] = await _fetch_citation(claim, source_text, result["verdict"])
         return result
+
+
+async def _fetch_citation(claim: str, source_text: str, verdict: str) -> str:
+    """Outbound HTTP call to citation_service.py's `/verify_citation`
+    endpoint -- the real service-to-service hop R7 exists to check.
+    Never raises: a citation-service failure (down, timeout, bad
+    response) degrades to an empty citation rather than failing the
+    whole claim check, same "don't fail the pipeline over a secondary
+    signal" discipline `scheduler.py`'s narrative-generation step uses.
+    """
+    with tracer.start_as_current_span("fact_check_and_cite.fetch_citation") as span:
+        span.set_attribute("claim.text", claim[:200])
+        span.set_attribute("peer.service", "citation-service")
+        span.set_attribute("http.url", f"{CITATION_SERVICE_URL}/verify_citation")
+
+        headers = {"Content-Type": "application/json"}
+        if chaos.maybe_drop_traceparent_for_citation_call():
+            # R7's chaos trigger fired: deliberately send this request with
+            # NO traceparent header. citation_service.py's own middleware
+            # then has nothing to extract and starts a brand-new, disconnected
+            # trace -- exactly the failure R7's detection logic looks for.
+            span.set_attribute("chaos.r7_traceparent_dropped", True)
+        else:
+            headers = inject_traceparent_header(headers)
+
+        payload = {"claim": claim, "source_text": source_text, "verdict": verdict}
+        try:
+            async with httpx.AsyncClient(timeout=CITATION_SERVICE_TIMEOUT_SECONDS) as http_client:
+                response = await http_client.post(
+                    f"{CITATION_SERVICE_URL}/verify_citation", json=payload, headers=headers
+                )
+                response.raise_for_status()
+                return str(response.json().get("citation", ""))
+        except httpx.HTTPError as exc:
+            span.set_attribute("citation_service.error", str(exc))
+            return ""
 
 
 def _run_claim_check_llm(claim: str, source_text: str) -> dict:

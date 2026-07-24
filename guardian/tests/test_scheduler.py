@@ -18,6 +18,7 @@ from guardian.rules.r1_missing_fields import R1Result
 from guardian.rules.r2_cardinality import R2Result
 from guardian.rules.r3_orphaned_spans import R3Result
 from guardian.rules.r6_silent_truncation import R6Result
+from guardian.rules.r7_cross_service_breaks import R7Result
 
 
 def _clean_result_set() -> dict:
@@ -26,6 +27,7 @@ def _clean_result_set() -> dict:
         r2=R2Result(cardinality_risk_score=0.0, evaluated_keys=5, flagged_keys=0, findings=()),
         r3=R3Result(orphaned_span_rate_pct=0.0, total_spans_with_parent=20, orphaned_spans=0, findings=()),
         r6=R6Result(truncation_rate_pct=0.0, total_payload_spans=4, truncated_payload_spans=0, findings=()),
+        r7=R7Result(cross_service_break_rate_pct=0.0, total_handoffs=2, broken_handoffs=0, findings=()),
     )
 
 
@@ -58,10 +60,14 @@ def _patch_mcp_and_rules(monkeypatch, results: dict | None = None):
     async def _r6_run(client, window):
         return results["r6"]
 
+    async def _r7_run(client, window):
+        return results["r7"]
+
     monkeypatch.setattr(scheduler.r1_missing_fields, "run", _r1_run)
     monkeypatch.setattr(scheduler.r2_cardinality, "run", _r2_run)
     monkeypatch.setattr(scheduler.r3_orphaned_spans, "run", _r3_run)
     monkeypatch.setattr(scheduler.r6_silent_truncation, "run", _r6_run)
+    monkeypatch.setattr(scheduler.r7_cross_service_breaks, "run", _r7_run)
 
 
 # -- service_key ----------------------------------------------------------
