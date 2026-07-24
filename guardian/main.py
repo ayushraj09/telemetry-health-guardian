@@ -54,7 +54,7 @@ from pydantic import BaseModel
 
 from guardian.health_score import HealthScoreResult
 from guardian.mcp_client import SignozMCPClient, SignozMCPError
-from guardian.narrative import AuditFindings, answer_question, validate_citations
+from guardian.narrative import AuditFindings, answer_question, probable_fixes, validate_citations
 from guardian.scheduler import (
     AuditCycleResult,
     AuditStore,
@@ -234,4 +234,9 @@ async def chat(body: ChatRequest) -> dict[str, Any]:
         # Best-effort signal (see narrative.py::validate_citations) -- rule
         # IDs that fired in this audit but weren't named in the answer.
         "rules_fired_but_uncited": validate_citations(answer, findings),
+        # Deterministic, LLM-independent (see narrative.py::probable_fixes)
+        # -- rule_id -> fix hint for every rule that fired. The frontend
+        # renders this as its own panel rather than parsing the answer's
+        # prose for a fix suggestion.
+        "probable_fixes": probable_fixes(findings),
     }
