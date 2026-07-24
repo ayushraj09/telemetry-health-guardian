@@ -88,6 +88,29 @@ SYSTEM_PROMPT = (
     "clean; do not invent a problem for it."
 )
 
+RULE_FIX_HINTS: dict[str, str] = {
+    "R1": (
+        "Ensure every gen_ai span sets the required semantic attributes, "
+        "especially model, operation, provider, and request/response metadata."
+    ),
+    "R2": (
+        "Move high-cardinality values such as prompts, user IDs, trace IDs, "
+        "and document names out of indexed span attributes or bucket them."
+    ),
+    "R3": (
+        "Propagate the active OpenTelemetry context across async tasks, tool "
+        "calls, and subprocess boundaries so child spans keep valid parents."
+    ),
+    "R6": (
+        "Record both produced and consumed payload sizes, then inspect the "
+        "tool/model boundary that reduced bytes before they reached context."
+    ),
+    "R7": (
+        "Check cross-service trace propagation and make sure downstream spans "
+        "carry the incoming trace context instead of starting detached traces."
+    ),
+}
+
 
 @dataclass(frozen=True)
 class AuditFindings:
@@ -193,7 +216,7 @@ def build_prompt(findings: AuditFindings) -> str:
     )
 
 
-def _fired_rule_ids(findings: AuditFindings) -> list[str]:
+def fired_rule_ids(findings: AuditFindings) -> list[str]:
     """Which rule IDs have >=1 finding, in canonical order. Shared by
     `build_chat_prompt` (to state the required-coverage list explicitly)
     and `validate_citations` (to check the model actually met it)."""
@@ -210,6 +233,15 @@ def _fired_rule_ids(findings: AuditFindings) -> list[str]:
     if findings.r7 is not None and getattr(findings.r7, "findings", ()):
         fired.append("R7")
     return fired
+
+
+def probable_fixes(findings: AuditFindings) -> dict[str, str]:
+    """Deterministic rule-ID -> likely-code-cause hints for fired rules only."""
+    return {
+        rule_id: RULE_FIX_HINTS[rule_id]
+        for rule_id in fired_rule_ids(findings)
+        if rule_id in RULE_FIX_HINTS
+    }
 
 
 def build_chat_prompt(findings: AuditFindings, question: str) -> str:
@@ -230,7 +262,7 @@ def build_chat_prompt(findings: AuditFindings, question: str) -> str:
     "ground your answer in the JSON."
     """
     payload = json.dumps(findings.to_json_dict(), indent=2, default=str)
-    fired = _fired_rule_ids(findings)
+    fired = fired_rule_ids(findings)
     if fired:
         coverage_instruction = (
             f"The following rules fired this audit and have at least one finding: "
@@ -278,4 +310,4 @@ def validate_citations(narrative: str, findings: AuditFindings) -> list[str]:
     A non-empty list is a signal a caller can log or retry the generation
     on -- not proof the narrative is wrong (one sentence can legitimately
     cover several findings from the same rule)."""
-    return [rule_id for rule_id in _fired_rule_ids(findings) if rule_id not in narrative]
+    return [rule_id for rule_id in fired_rule_ids(findings) if rule_id not in narrative]
