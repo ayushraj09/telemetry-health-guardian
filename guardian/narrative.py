@@ -88,28 +88,62 @@ SYSTEM_PROMPT = (
     "clean; do not invent a problem for it."
 )
 
+# Rule ID -> the class of code-level cause that typically produces that
+# rule's finding, in this specific codebase. This exists because the LLM
+# only ever sees the rule engine's JSON output, never demo-agent-app's or
+# otel-griptape's actual source -- without this table it can only restate
+# the finding, not suggest where to look. Keep each hint one sentence,
+# pointed at a real file/mechanism (not "check your instrumentation"),
+# and update it if a rule's real-world cause set changes.
 RULE_FIX_HINTS: dict[str, str] = {
     "R1": (
-        "Ensure every gen_ai span sets the required semantic attributes, "
-        "especially model, operation, provider, and request/response metadata."
+        "A required token-usage field is missing on a chat span. Check the "
+        "instrumentor call order in otel_griptape -- a field dropped here "
+        "usually means set_attribute ran before the usage value was "
+        "resolved, or a chaos-mode fault (chaos.py's R1 path) is installed."
     ),
     "R2": (
-        "Move high-cardinality values such as prompts, user IDs, trace IDs, "
-        "and document names out of indexed span attributes or bucket them."
+        "Raw document/tool content was attached as an indexed span "
+        "attribute instead of an event. Look at the call site right after "
+        "extraction (e.g. fetch_and_read.py's fetch_and_read.read_pdf "
+        "span) for a set_attribute call carrying full text -- it should "
+        "use otel-griptape's event-based capture instead."
     ),
     "R3": (
-        "Propagate the active OpenTelemetry context across async tasks, tool "
-        "calls, and subprocess boundaries so child spans keep valid parents."
+        "A span's parent_span_id doesn't resolve to any span in the same "
+        "trace. Look at whichever call schedules work onto a thread pool "
+        "or async task (e.g. fact_check_and_cite.py's parallel claim "
+        "checks) for a context that wasn't attach()'d before submission."
     ),
     "R6": (
-        "Record both produced and consumed payload sizes, then inspect the "
-        "tool/model boundary that reduced bytes before they reached context."
+        "Less context reached the model than was actually extracted. "
+        "Check which backend handled this claim-check call and its "
+        "context-window size (ollama_r6.py's num_ctx is the usual "
+        "suspect) -- the gap is a real context-window truncation, not a "
+        "fixed character slice."
     ),
     "R7": (
-        "Check cross-service trace propagation and make sure downstream spans "
-        "carry the incoming trace context instead of starting detached traces."
+        "One trace silently became two. Check the outbound HTTP call just "
+        "before this span (e.g. fact_check_and_cite.py's citation fetch) "
+        "for a missing W3C traceparent header -- it should be injected via "
+        "otel_griptape.context_propagation.inject_traceparent_header."
     ),
 }
+
+
+def _fix_hints_block(fired_rule_ids: list[str]) -> str:
+    """Only the hints for rules that actually fired -- no point grounding
+    the model in remediation advice for a clean rule."""
+    if not fired_rule_ids:
+        return ""
+    lines = [f"- {rid}: {RULE_FIX_HINTS[rid]}" for rid in fired_rule_ids if rid in RULE_FIX_HINTS]
+    if not lines:
+        return ""
+    return (
+        "\n\nReference -- likely code-level cause per rule (use this to "
+        "suggest a probable fix; don't invent a cause not grounded here or "
+        "in the findings JSON):\n" + "\n".join(lines)
+    )
 
 
 @dataclass(frozen=True)
@@ -218,8 +252,11 @@ def build_prompt(findings: AuditFindings) -> str:
 
 def fired_rule_ids(findings: AuditFindings) -> list[str]:
     """Which rule IDs have >=1 finding, in canonical order. Shared by
-    `build_chat_prompt` (to state the required-coverage list explicitly)
-    and `validate_citations` (to check the model actually met it)."""
+    `build_chat_prompt` (to state the required-coverage list explicitly),
+    `validate_citations` (to check the model actually met it), and
+    `probable_fixes` (to know which hints to surface). Public: the API
+    layer (main.py) also needs this to build a deterministic response
+    field, not just this module internally."""
     fired = [
         rule_id
         for rule_id, result in (
@@ -233,15 +270,6 @@ def fired_rule_ids(findings: AuditFindings) -> list[str]:
     if findings.r7 is not None and getattr(findings.r7, "findings", ()):
         fired.append("R7")
     return fired
-
-
-def probable_fixes(findings: AuditFindings) -> dict[str, str]:
-    """Deterministic rule-ID -> likely-code-cause hints for fired rules only."""
-    return {
-        rule_id: RULE_FIX_HINTS[rule_id]
-        for rule_id in fired_rule_ids(findings)
-        if rule_id in RULE_FIX_HINTS
-    }
 
 
 def build_chat_prompt(findings: AuditFindings, question: str) -> str:
@@ -277,6 +305,13 @@ def build_chat_prompt(findings: AuditFindings, question: str) -> str:
             "No rules fired this audit (all findings lists are empty) -- say so "
             "plainly rather than inventing an issue."
         )
+    fix_instruction = (
+        "\n\nFor every rule you cite, also suggest a probable fix as a "
+        "separate short sentence (don't merge it into the diagnosis "
+        "sentence) -- ground it in the reference hints below, and say so "
+        "plainly if a fired rule has no matching hint rather than "
+        "inventing one." if fired else ""
+    )
     return (
         f"Rule engine findings for service {findings.service or '(all services)'}:\n\n"
         f"```json\n{payload}\n```\n\n"
@@ -285,6 +320,8 @@ def build_chat_prompt(findings: AuditFindings, question: str) -> str:
         "ID(s) and span/attribute(s) involved. If the JSON doesn't contain "
         "enough information to answer, say so plainly instead of guessing.\n\n"
         f"{coverage_instruction}"
+        f"{fix_instruction}"
+        f"{_fix_hints_block(fired)}"
     )
 
 
@@ -311,3 +348,27 @@ def validate_citations(narrative: str, findings: AuditFindings) -> list[str]:
     on -- not proof the narrative is wrong (one sentence can legitimately
     cover several findings from the same rule)."""
     return [rule_id for rule_id in fired_rule_ids(findings) if rule_id not in narrative]
+
+
+def probable_fixes(findings: AuditFindings) -> dict[str, str]:
+    """Deterministic rule_id -> fix hint for every rule that fired this
+    audit, straight from RULE_FIX_HINTS -- no LLM call involved.
+
+    `build_chat_prompt`'s fix_instruction asks the model to weave a fix
+    suggestion into its prose, which is good for a readable chat answer,
+    but prose compliance isn't guaranteed the way a rule engine's own
+    detection logic is (see this module's docstring on why (2)-style
+    post-hoc checks exist alongside (1)-style prompt instructions). This
+    function is the (2)-style guarantee for fixes specifically: a caller
+    (the `/chat` API layer) can always attach a reliable fix list to the
+    response regardless of what the LLM actually wrote, and a frontend
+    can render it as its own "probable fix" panel instead of parsing the
+    LLM's prose for one.
+
+    A fired rule with no entry in RULE_FIX_HINTS is simply omitted here --
+    never fabricate a hint that isn't in the table."""
+    return {
+        rule_id: RULE_FIX_HINTS[rule_id]
+        for rule_id in fired_rule_ids(findings)
+        if rule_id in RULE_FIX_HINTS
+    }

@@ -50,7 +50,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from guardian.health_score import HealthScoreResult
@@ -67,21 +66,6 @@ from guardian.writeback import HealthWriteback, ensure_alerts, ensure_notificati
 
 logging.basicConfig(level=os.getenv("GUARDIAN_LOG_LEVEL", "INFO"))
 logger = logging.getLogger("guardian.main")
-
-
-def _cors_allowed_origins() -> list[str]:
-    raw_origins = os.getenv(
-        "GUARDIAN_CORS_ALLOW_ORIGINS",
-        "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8501,http://127.0.0.1:8501",
-    )
-    return [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
-
-
-def _cors_allowed_origin_regex() -> str:
-    return os.getenv(
-        "GUARDIAN_CORS_ALLOW_ORIGIN_REGEX",
-        r"^https?://(?:localhost|127\.0\.0\.1)(?::\d+)?$",
-    )
 
 # Literal path segments a caller can use for the "no service scope" (all
 # services combined) audit -- `scheduler.service_key(None)` produces
@@ -158,14 +142,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Telemetry Health Guardian", lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_allowed_origins(),
-    allow_origin_regex=_cors_allowed_origin_regex(),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 class AuditRunRequest(BaseModel):
@@ -258,5 +234,9 @@ async def chat(body: ChatRequest) -> dict[str, Any]:
         # Best-effort signal (see narrative.py::validate_citations) -- rule
         # IDs that fired in this audit but weren't named in the answer.
         "rules_fired_but_uncited": validate_citations(answer, findings),
+        # Deterministic, LLM-independent (see narrative.py::probable_fixes)
+        # -- rule_id -> fix hint for every rule that fired. The frontend
+        # renders this as its own panel rather than parsing the answer's
+        # prose for a fix suggestion.
         "probable_fixes": probable_fixes(findings),
     }

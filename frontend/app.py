@@ -66,6 +66,14 @@ def _send_chat(service: str, question: str) -> tuple[dict | None, str | None]:
     return resp.json(), None
 
 
+def _render_probable_fixes(fixes: dict[str, str] | None) -> None:
+    if not fixes:
+        return
+    st.markdown("**Probable fixes**")
+    for rule_id, fix in fixes.items():
+        st.markdown(f"- `{rule_id}`: {fix}")
+
+
 with st.sidebar:
     st.header("🩺 Telemetry Health Guardian")
     st.caption("An auditor for telemetry hygiene -- not what the agent did, but whether its telemetry can be trusted.")
@@ -143,6 +151,7 @@ with tab_chat:
                     "⚠️ Rules that fired but weren't named in this answer: "
                     + ", ".join(entry["rules_fired_but_uncited"])
                 )
+            _render_probable_fixes(entry.get("probable_fixes"))
 
     question = st.chat_input("e.g. Why did the research pipeline's score drop?")
     if question:
@@ -160,10 +169,12 @@ with tab_chat:
                         "⚠️ Rules that fired but weren't named in this answer: "
                         + ", ".join(answer_payload["rules_fired_but_uncited"])
                     )
+                _render_probable_fixes(answer_payload.get("probable_fixes"))
                 st.session_state["chat_history"].append(
                     {
                         "question": question,
                         "answer": answer_payload["answer"],
                         "rules_fired_but_uncited": answer_payload.get("rules_fired_but_uncited", []),
+                        "probable_fixes": answer_payload.get("probable_fixes", {}),
                     }
                 )
