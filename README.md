@@ -94,7 +94,7 @@ flowchart TB
     API -->|"writeback.py: health-score metric + issue logs (direct OTLP)"| SIGNOZ
     API -->|"writeback.py: alert rules + notification channel (MCP)"| MCP
 
-    UI["frontend/app.py (Streamlit)<br/>health report + chat"]
+    UI["frontend-next (Next.js)<br/>health report + chat"]
     API --> UI
 
     SIGNOZ --> DASH[SigNoz Dashboards]
@@ -216,6 +216,7 @@ telemetry-health-guardian/
 │
 ├── demo-agent-app/                    # document research pipeline
 │   ├── README.md                      # see this for stage-by-stage docs
+│   ├── api.py                         # FastAPI wrapper for the demo agent
 │   ├── app.py                         # orchestrates the 4 stages
 │   ├── planner.py                     # Stage 1
 │   ├── fetch_and_read.py              # Stage 2 — full-text extraction, no truncation
@@ -250,13 +251,15 @@ telemetry-health-guardian/
 │   └── tests/                         # test_r1..r7, test_health_score, test_llm_client,
 │                                       # test_narrative, test_main, test_scheduler
 │
-├── frontend/
-│   ├── app.py                         # Streamlit: health report view + chat view
-│   └── requirements.txt
+├── frontend-next/                     # Next.js dashboard + chat UI
+│   ├── package.json
+│   ├── app/                           # Next.js App Router pages
+│   ├── components/                    # charts/, product/, ui/ component libraries
+│   ├── lib/                           # shared utilities
+│   └── styles/
 │
 └── experiments/                       # per-stage verification drivers + build notes
     ├── stage_wise_guidance.txt
-    ├── stage7_notes.txt
     └── test_stage3.py … test_stage8.py
 ```
 
@@ -271,7 +274,7 @@ pip install -r requirements.txt
 pip install -e otel-griptape
 pip install -e guardian[test]
 pip install -r demo-agent-app/requirements.txt
-pip install -r frontend/requirements.txt
+cd frontend-next && npm install && cd ..
 ```
 
 `env.example` covers: SigNoz Cloud MCP (`SIGNOZ_INSTANCE_URL`,
@@ -330,7 +333,7 @@ uvicorn guardian.main:app --reload --port 8000
 uvicorn api:app --port 8001
 
 # (optional) start the frontend
-streamlit run frontend/app.py
+cd frontend-next && npm run dev
 ```
 
 `chaos.py`'s triggers, each independently rated (`CHAOS_MODE=1` required for
