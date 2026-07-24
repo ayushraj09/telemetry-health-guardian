@@ -18,7 +18,9 @@ from guardian.narrative import (
     build_chat_prompt,
     build_prompt,
     combine_results,
+    fired_rule_ids,
     generate_report,
+    probable_fixes,
     validate_citations,
 )
 from guardian.rules.r1_missing_fields import R1Result
@@ -155,6 +157,18 @@ def test_validate_citations_ignores_rules_with_no_findings():
     findings = _clean_findings()
 
     assert validate_citations("everything looks healthy, no issues found", findings) == []
+
+
+def test_fired_rule_ids_returns_canonical_order():
+    assert fired_rule_ids(_dirty_findings()) == ["R3", "R6"]
+
+
+def test_probable_fixes_only_returns_fired_rules():
+    fixes = probable_fixes(_dirty_findings())
+
+    assert sorted(fixes) == ["R3", "R6"]
+    assert "context" in fixes["R3"]
+    assert "payload" in fixes["R6"]
 
 
 # -- generate_report / answer_question: mocked-completion integration ------

@@ -90,6 +90,23 @@ def test_health_endpoint(client):
     assert resp.json() == {"status": "ok"}
 
 
+@pytest.mark.parametrize("path,method", [
+    ("/health", "GET"),
+    ("/audit/run", "POST"),
+])
+def test_cors_preflight_allows_browser_requests(client, path, method):
+    resp = client.options(
+        path,
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": method,
+        },
+    )
+
+    assert resp.status_code == 200
+    assert resp.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
 def test_audit_run_triggers_a_cycle_and_returns_serialized_result(client, monkeypatch):
     async def fake_run_audit_cycle(service, store, writeback=None, **kwargs):
         result = _clean_result(service)
@@ -186,6 +203,7 @@ def test_chat_uses_cached_findings_and_returns_answer(client, monkeypatch):
     body = resp.json()
     assert body["answer"] == "Answer to: why is it clean?"
     assert body["rules_fired_but_uncited"] == []
+    assert body["probable_fixes"] == {}
 
 
 def test_chat_runs_a_fresh_audit_when_nothing_cached(client, monkeypatch):
