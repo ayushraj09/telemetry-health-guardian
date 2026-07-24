@@ -1,5 +1,11 @@
 # otel-griptape
 
+Part of the [Telemetry Health Guardian](../README.md) project — see the
+root README for how this library fits together with the
+[Guardian service](../guardian/README.md) and the
+[demo agent app](../demo-agent-app/README.md) it instruments. This
+document covers only `otel-griptape` itself.
+
 GenAI-semantic-convention-compliant OpenTelemetry auto-instrumentation for
 [Griptape](https://github.com/griptape-ai/griptape). Griptape has no
 maintained OTel instrumentation package as of this writing (no

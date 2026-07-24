@@ -22,7 +22,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from griptape.configs.defaults_config import Defaults
 from griptape.configs.drivers.openai_drivers_config import OpenAiDriversConfig
-from griptape.drivers.prompt.openai import OpenAiChatPromptDriver
+from griptape.drivers.prompt.openai_chat_prompt_driver import OpenAiChatPromptDriver
 
 
 def _parse_otlp_headers(raw: str) -> dict:

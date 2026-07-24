@@ -119,7 +119,5 @@ the interim.
 
 ## Verification
 
-The full Section 8 end-to-end flow, and how it was rehearsed for this
-submission, is in [`docs/REHEARSAL.md`](REHEARSAL.md). Per-stage build
-notes and gate-check results are in
+Per-stage build notes and gate-check results are in
 [`experiments/stage_wise_guidance.txt`](../experiments/stage_wise_guidance.txt).

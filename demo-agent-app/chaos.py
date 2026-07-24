@@ -21,9 +21,11 @@ own stage order (Section 6):
         context for it -- see `maybe_break_context_for_claim_check`'s own
         docstring for why this, rather than clearing context outright, is
         the correct chaos trigger for R3's literal detection logic.
-  - R6: truncate the text placed into context when reading a long PDF to a
-        fixed small slice, while still recording the true full extracted
-        size -- see `maybe_truncate_for_context`.
+  - R6: route one Fact-Check & Cite claim-check call through a real local
+        Ollama model with a small `num_ctx`, instead of the normal OpenAI
+        path -- Ollama's own context-window limit silently drops whatever
+        doesn't fit, a REAL truncation, not a simulated one. See
+        `maybe_use_ollama_for_claim_check`.
   - R7: call `citation_service.py` without forwarding the W3C `traceparent`
         header on one fetch_check_and_cite.py claim's citation-fetch call --
         see `maybe_drop_traceparent_for_citation_call`'s own docstring.
@@ -46,15 +48,22 @@ Env vars:
                           same run staying correctly parented, so the
                           orphan is visibly one broken branch in an
                           otherwise-healthy trace tree, not every branch.
-    CHAOS_R6_RATE         float 0-1, probability a given PDF read gets its
-                          context-text truncated. Default 1.0 -- the demo
+    CHAOS_R6_RATE         float 0-1, probability a given Fact-Check & Cite
+                          claim-check call gets routed through Ollama
+                          (with real context-window truncation) instead of
+                          the normal OpenAI path. Default 1.0 -- the demo
                           fixture set is small (Section 4.1: "at least one
                           long PDF"), so a low default rate risks the R6
                           gate check simply not firing on a given run.
-    CHAOS_R6_TRUNCATE_CHARS  int, fixed slice length truncated text is cut
-                          to. Default 700 -- matches Section 2's canonical
-                          R6 example verbatim ("the agent only sees the
-                          first 700 characters").
+    CHAOS_R6_OLLAMA_MODEL    Ollama model name used for the R6-routed
+                          call. Default "llama3.2" -- must already be
+                          pulled locally (`ollama pull llama3.2`).
+    CHAOS_R6_NUM_CTX      int, the `num_ctx` (token context window) passed
+                          to Ollama for the R6-routed call. Default 2048 --
+                          Ollama's own real default (see ollama_r6.py's
+                          module docstring for why this specific value is
+                          a genuine, reproducible truncation cause and not
+                          an arbitrary chaos knob).
     CHAOS_R7_RATE         float 0-1, probability a given Fact-Check & Cite
                           claim's outbound HTTP call to citation_service.py
                           gets sent with NO traceparent header. Default
@@ -97,7 +106,8 @@ _r1_rate = 0.0
 _r2_rate = 0.0
 _r3_rate = 0.0
 _r6_rate = 0.0
-_r6_truncate_chars = 700
+_r6_ollama_model = "llama3.2"
+_r6_num_ctx = 2048
 _r7_rate = 0.0
 _r1_decisions: dict[int, str | None] = {}
 
@@ -128,7 +138,7 @@ def install_chaos() -> None:
     possible in app.py -- before otel_griptape.instrument() and before
     run_pipeline() -- since this patches the SDK Span class globally, not
     a specific tracer/provider instance."""
-    global _installed, _original_set_attribute, _rng, _r1_rate, _r2_rate, _r3_rate, _r6_rate, _r6_truncate_chars, _r7_rate
+    global _installed, _original_set_attribute, _rng, _r1_rate, _r2_rate, _r3_rate, _r6_rate, _r6_ollama_model, _r6_num_ctx, _r7_rate
 
     if not is_enabled():
         return
@@ -141,7 +151,8 @@ def install_chaos() -> None:
     _r2_rate = _env_float("CHAOS_R2_RATE", 1.0)
     _r3_rate = _env_float("CHAOS_R3_RATE", 0.3)
     _r6_rate = _env_float("CHAOS_R6_RATE", 1.0)
-    _r6_truncate_chars = int(_env_float("CHAOS_R6_TRUNCATE_CHARS", 700))
+    _r6_ollama_model = os.getenv("CHAOS_R6_OLLAMA_MODEL", "llama3.2")
+    _r6_num_ctx = int(_env_float("CHAOS_R6_NUM_CTX", 2048))
     _r7_rate = _env_float("CHAOS_R7_RATE", 0.5)
 
     _original_set_attribute = SDKSpan.set_attribute
@@ -150,7 +161,7 @@ def install_chaos() -> None:
 
     print(
         f"[chaos] installed -- R1 rate={_r1_rate}, R2 rate={_r2_rate}, R3 rate={_r3_rate}, "
-        f"R6 rate={_r6_rate} (truncate to {_r6_truncate_chars} chars), R7 rate={_r7_rate}, "
+        f"R6 rate={_r6_rate} (model={_r6_ollama_model}, num_ctx={_r6_num_ctx}), R7 rate={_r7_rate}, "
         f"seed={seed or 'random'}"
     )
 
@@ -261,30 +272,43 @@ def maybe_break_context_for_claim_check() -> otel_context.Context | None:
     return trace.set_span_in_context(trace.NonRecordingSpan(fake_parent_context))
 
 
-# --- R6: truncate the text placed into context, keep the true raw size -----
+# --- R6: route a claim-check call through real Ollama context-window ------
+# truncation instead of the normal OpenAI path -----------------------------
 
-def maybe_truncate_for_context(text: str) -> str:
-    """Call this from fetch_and_read.py right after extracting a PDF's
-    full text, BEFORE placing it into the `sources` dict that becomes the
-    LLM's context in fact_check_and_cite.py / report_writer.py. No-op
-    unless chaos is installed and wins the R6 dice roll -- callers invoke
-    this unconditionally and let chaos decide, same pattern as
-    `tag_r2_raw_content`.
+def maybe_use_ollama_for_claim_check() -> bool:
+    """Call this from fact_check_and_cite.py's `_run_claim_check_llm`,
+    once per claim, BEFORE deciding which backend checks it. No-op
+    (returns False) unless chaos is installed and wins the R6 dice roll --
+    same pattern as every other chaos gate in this module.
 
-    Returns a fixed small slice of `text` instead of the full extracted
-    text -- silently, exactly like a real truncation bug: no exception, no
-    attribute set here that flags anything by itself. It's the caller's
-    job (via `otel_griptape.payload_tracking.record_payload_sizes`, called
-    separately on the TRUE extracted length vs. the length of whatever
-    this function returns) to make the gap checkable at all -- that
-    discrepancy, real but otherwise invisible, is the entire point of R6
-    (Section 4.1's canonical case).
+    When this returns True, the caller must route that one claim's check
+    through `ollama_r6.run_claim_check_via_ollama` instead of the normal
+    griptape/OpenAI `Agent()` path. That function sends the FULL combined
+    source text to a real local Ollama model with `num_ctx` set to
+    `ollama_num_ctx()` -- Ollama's own context-window limit then silently
+    drops whatever doesn't fit, a real truncation this module doesn't fake
+    or need to fake. See ollama_r6.py's module docstring for the full
+    mechanism and why it replaced the earlier fixed-character-slice
+    approach.
     """
     if not _installed or _rng is None:
-        return text
-    if _rng.random() >= _r6_rate:
-        return text
-    return text[:_r6_truncate_chars]
+        return False
+    return _rng.random() < _r6_rate
+
+
+def ollama_model() -> str:
+    """The Ollama model name configured for R6-routed calls (`CHAOS_R6_OLLAMA_MODEL`,
+    default 'llama3.2'). Valid to call whether or not chaos is installed --
+    returns the module-level default if `install_chaos()` hasn't run."""
+    return _r6_ollama_model
+
+
+def ollama_num_ctx() -> int:
+    """The `num_ctx` configured for R6-routed Ollama calls (`CHAOS_R6_NUM_CTX`,
+    default 2048 -- Ollama's own real default). Valid to call whether or
+    not chaos is installed."""
+    return _r6_num_ctx
+
 
 
 # --- R7: drop the traceparent header on an outbound service-to-service call -

@@ -23,6 +23,19 @@ header survives the call, keeping one claim's fact-check trace and its
 citation-lookup trace as a single connected trace instead of silently
 becoming two. `chaos.py`'s R7 trigger (`maybe_drop_traceparent_for_citation_call`)
 decides, per call, whether that header actually gets sent.
+
+Stage 8 rework (R6): the verdict check itself now has two possible
+backends. Normally (`_run_claim_check_llm`, below) it's griptape's
+`Agent()` over OpenAI, unchanged from Stage 1/4. But `chaos.py`'s
+`maybe_use_ollama_for_claim_check()` may, per claim, redirect that one
+call to `ollama_r6.run_claim_check_via_ollama` instead -- a real local
+Ollama model with a small `num_ctx`, manually instrumented outside
+griptape entirely. See `ollama_r6.py`'s own module docstring for why that
+path can't just go through griptape's `Agent()` the way the normal path
+does. Either way, `source_text` here is always the FULL combined source
+text -- `fetch_and_read.py` no longer truncates anything, so whatever
+truncation R6 detects happens for real, inside whichever backend handled
+that one claim.
 """
 
 import asyncio
@@ -36,6 +49,7 @@ from opentelemetry import context as otel_context
 from opentelemetry import trace
 
 import chaos
+import ollama_r6
 from otel_griptape.context_propagation import inject_traceparent_header
 
 tracer = trace.get_tracer(__name__)
@@ -87,9 +101,22 @@ async def _check_one_claim(claim: str, source_text: str) -> dict:
         chaos_context = chaos.maybe_break_context_for_claim_check()
         token = otel_context.attach(chaos_context) if chaos_context is not None else None
         try:
-            # run_in_executor hands this off to a worker thread so multiple
-            # claims can be checked in parallel without blocking the event loop.
-            result = await loop.run_in_executor(None, _run_claim_check_llm, claim, source_text)
+            # R6's chaos trigger: no-op unless CHAOS_MODE=1 and this claim
+            # wins the dice roll. When it fires, this one claim's check is
+            # routed through a real local Ollama model with a small
+            # num_ctx instead of the normal OpenAI path -- see
+            # ollama_r6.py's own module docstring for why that call is
+            # manually instrumented rather than going through griptape.
+            if chaos.maybe_use_ollama_for_claim_check():
+                # run_in_executor hands this off to a worker thread so
+                # multiple claims can be checked in parallel without
+                # blocking the event loop -- same reasoning as the normal
+                # path below.
+                result = await loop.run_in_executor(
+                    None, ollama_r6.run_claim_check_via_ollama, claim, source_text
+                )
+            else:
+                result = await loop.run_in_executor(None, _run_claim_check_llm, claim, source_text)
         finally:
             if token is not None:
                 otel_context.detach(token)
@@ -145,16 +172,15 @@ async def _fetch_citation(claim: str, source_text: str, verdict: str) -> str:
 
 
 def _run_claim_check_llm(claim: str, source_text: str) -> dict:
-    # NOTE: the full combined source text is passed here deliberately, with
-    # no arbitrary character slice. An earlier version hard-truncated this
-    # to source_text[:8000], which silently dropped most of a long PDF's
-    # content on every run -- not just under chaos.py -- and did so at a
-    # point otel-griptape's R6 tracking (payload.raw_bytes/captured_bytes,
-    # set in fetch_and_read.py) can't see. That undermined the "healthy by
-    # construction until chaos.py fires" baseline this pipeline depends on.
-    # R6's truncation should be the only deliberate truncation point in the
-    # system, so this stage passes through everything fetch_and_read.py
-    # extracted.
+    # This is the normal (non-chaos) claim-check path only: griptape's
+    # Agent() over OpenAI, no manual truncation. `_check_one_claim` calls
+    # this directly whenever chaos.maybe_use_ollama_for_claim_check()
+    # doesn't fire for a given claim; when it does fire, that claim is
+    # routed to ollama_r6.run_claim_check_via_ollama instead, and this
+    # function is skipped entirely for it. `source_text` here is always
+    # the full combined source text -- fetch_and_read.py never truncates,
+    # and R6's real truncation point now lives inside ollama_r6.py, not
+    # here.
     agent = Agent()
     prompt = CLAIM_CHECK_PROMPT.format(claim=claim, source_text=source_text)
     result = agent.run(prompt)
