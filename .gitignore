@@ -15,6 +15,9 @@ stage1_chaos_output.txt
 
 *.zip
 
+frontend-next/.next/
+frontend-next/node_modules/
+
 **/.pytest_cache/**
 uv.lock
 

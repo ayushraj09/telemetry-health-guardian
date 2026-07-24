@@ -78,8 +78,10 @@ All of `guardian/`'s env vars are documented inline in
 docstring for the cloud-vs-self-hosted split), `LLM_PROVIDER` /
 `OPENAI_API_KEY` / `OPENAI_MODEL` / `OLLAMA_BASE_URL` / `OLLAMA_MODEL`
 (reasoning layer), and `AUDIT_INTERVAL_MINUTES` / `FASTAPI_PORT` /
-`AUDIT_SERVICES` / `AUDIT_WINDOW` / `GUARDIAN_ALERT_WEBHOOK_URL` (service
-behavior). `scheduler.py` defaults `AUDIT_WINDOW` to `5m` if unset.
+`AUDIT_SERVICES` / `AUDIT_WINDOW` / `GUARDIAN_CORS_ALLOW_ORIGINS` /
+`GUARDIAN_CORS_ALLOW_ORIGIN_REGEX` / `GUARDIAN_ALERT_WEBHOOK_URL`
+(service behavior). `scheduler.py` defaults `AUDIT_WINDOW` to `5m` if
+unset.
 
 ## Tests
 
