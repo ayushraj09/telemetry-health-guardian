@@ -54,8 +54,7 @@ the one place this project's writes deliberately don't).
 | **R3** | Orphaned span trees within a single service — a span whose `parent_span_id` is set but resolves to nothing in the same trace, cross-checked against the window edge to rule out a parent that's simply out of range | ✅ built |
 | **R6** | Silent tool-payload truncation — compares `payload.raw_bytes` against `payload.captured_bytes` (custom attributes `otel-griptape` sets), flags when `captured_bytes < raw_bytes * 0.95` | ✅ built |
 | **R7** | Cross-service trace breaks at agent-to-agent handoffs — an outbound call from `demo-agent-app` to `citation_service.py` that produces a new root span in the callee instead of a continuation of the caller's trace, within a 2-second handoff window | ✅ built |
-| R5 | Raw-content/PII leakage heuristic | ❌ out of scope by explicit design decision — not implemented, stubbed, or scaffolded |
-| ~~R4~~ | Span-naming convention (standalone) | N/A — merged into R1; there is no separate R4 module |
+
 
 **Required MVP = R1 + R2 + R3 + R6**, and R7 (originally stretch/optional
 scope, cleared for build once the earlier stages' gates passed) is also
