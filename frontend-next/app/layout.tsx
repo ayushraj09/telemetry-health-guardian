@@ -18,6 +18,7 @@ const nav = [
   { href: "/", label: "Overview" },
   { href: "/rules", label: "Rules" },
   { href: "/chat", label: "Ask Guardian" },
+  { href: "/demo-agent", label: "Demo Agent" },
   { href: "/about", label: "How it works" },
 ];
 

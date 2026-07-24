@@ -19,12 +19,16 @@
   --rule-r7: #4fd1c5;
 
   /* Typography scale */
-  --text-display: 2.25rem;
-  --text-title: 1.125rem;
-  --text-body: 0.9375rem;
-  --text-detail: 0.8125rem;
-  --text-mono: 0.8125rem;
-  --leading-prose: 1.6;
+  --text-display: 1.75rem;
+  --text-title: 1rem;
+  --text-body: 0.875rem;
+  --text-detail: 0.75rem;
+  --text-mono: 0.75rem;
+  --leading-prose: 1.5;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px -12px rgba(0, 0, 0, 0.5);
+  --shadow-card-hover: 0 2px 4px rgba(0, 0, 0, 0.35), 0 16px 32px -12px rgba(79, 209, 197, 0.18);
+  --glow-accent: 0 0 0 1px color-mix(in srgb, var(--accent-guardian) 40%, transparent), 0 0 24px -4px color-mix(in srgb, var(--accent-guardian) 55%, transparent);
 }
 
 :root[data-theme="light"] {
@@ -48,10 +52,14 @@
   --rule-r7: #087d74;
 
   /* Typography scale */
-  --text-display: 2.25rem;
-  --text-title: 1.125rem;
-  --text-body: 0.9375rem;
-  --text-detail: 0.8125rem;
-  --text-mono: 0.8125rem;
-  --leading-prose: 1.6;
+  --text-display: 1.75rem;
+  --text-title: 1rem;
+  --text-body: 0.875rem;
+  --text-detail: 0.75rem;
+  --text-mono: 0.75rem;
+  --leading-prose: 1.5;
+
+  --shadow-card: 0 1px 2px rgba(17, 22, 27, 0.06), 0 8px 20px -12px rgba(17, 22, 27, 0.15);
+  --shadow-card-hover: 0 2px 4px rgba(17, 22, 27, 0.08), 0 16px 28px -12px rgba(8, 125, 116, 0.18);
+  --glow-accent: 0 0 0 1px color-mix(in srgb, var(--accent-guardian) 35%, transparent), 0 0 20px -6px color-mix(in srgb, var(--accent-guardian) 45%, transparent);
 }

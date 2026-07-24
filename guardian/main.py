@@ -162,6 +162,7 @@ app.add_middleware(
 
 class AuditRunRequest(BaseModel):
     service: str | None = None
+    time_range: str | None = None
 
 
 class ChatRequest(BaseModel):
@@ -193,9 +194,10 @@ async def health() -> dict[str, str]:
 @app.post("/audit/run")
 async def audit_run(body: AuditRunRequest | None = None) -> dict[str, Any]:
     service = body.service if body else None
+    time_range = body.time_range if body else None
     writeback: HealthWriteback | None = _state["writeback"]
     try:
-        result = await run_audit_cycle(service, store, writeback=writeback)
+        result = await run_audit_cycle(service, store, writeback=writeback, time_range=time_range)
     except SignozMCPError as exc:
         raise HTTPException(status_code=502, detail=f"SigNoz MCP call failed: {exc}") from exc
     except Exception as exc:  # noqa: BLE001 -- surfaced as a 500 rather than an opaque connection reset

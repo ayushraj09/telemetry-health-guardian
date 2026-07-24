@@ -1,4 +1,4 @@
-const DEMO_AGENT_API_BASE = process.env.NEXT_PUBLIC_DEMO_AGENT_API_URL ?? "http://localhost:8010";
+const DEMO_AGENT_API_BASE = process.env.NEXT_PUBLIC_DEMO_AGENT_API_URL ?? "http://localhost:8001";
 
 export type DemoAgentRunRequest = {
   question: string;

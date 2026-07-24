@@ -7,15 +7,26 @@ import { useToast } from "@/components/ui/toast";
 import { firedRuleIds, GuardianApiError, runAudit, serviceLabel } from "@/lib/api";
 import { useGuardianStore } from "@/lib/store";
 
+const AUDIT_WINDOWS = [
+  { value: "5m", label: "5 min" },
+  { value: "15m", label: "15 min" },
+  { value: "30m", label: "30 min" },
+  { value: "1h", label: "1 hour" },
+  { value: "6h", label: "6 hours" },
+  { value: "24h", label: "24 hours" },
+];
+
 export function AuditRunButton({ service }: { service?: string | null }) {
   const selectedService = useGuardianStore((state) => state.selectedService);
+  const auditWindow = useGuardianStore((state) => state.auditWindow);
+  const setAuditWindow = useGuardianStore((state) => state.setAuditWindow);
   const addAuditHistory = useGuardianStore((state) => state.addAuditHistory);
   const queryClient = useQueryClient();
   const toast = useToast();
   const auditService = service ?? selectedService;
 
   const mutation = useMutation({
-    mutationFn: () => runAudit(auditService),
+    mutationFn: () => runAudit(auditService, auditWindow),
     onSuccess: (cycle) => {
       addAuditHistory({
         timestamp: Date.now(),
@@ -38,9 +49,21 @@ export function AuditRunButton({ service }: { service?: string | null }) {
   });
 
   return (
-    <Button className={mutation.isPending ? "scan" : ""} disabled={mutation.isPending} onClick={() => mutation.mutate()} variant="primary">
-      <Play size={16} />
-      {mutation.isPending ? "Auditing..." : "Run audit"}
-    </Button>
+    <div className="audit-controls">
+      <label className="field-label">
+        Window
+        <select className="select" value={auditWindow} onChange={(e) => setAuditWindow(e.target.value)}>
+          {AUDIT_WINDOWS.map((w) => (
+            <option key={w.value} value={w.value}>
+              {w.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <Button className={mutation.isPending ? "scan" : ""} disabled={mutation.isPending} onClick={() => mutation.mutate()} variant="primary">
+        <Play size={16} />
+        {mutation.isPending ? "Auditing..." : "Run audit"}
+      </Button>
+    </div>
   );
 }

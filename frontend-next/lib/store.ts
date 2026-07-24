@@ -21,11 +21,13 @@ export type ChatMessage = {
 
 type GuardianState = {
   selectedService: string;
+  auditWindow: string;
   theme: "dark" | "light";
   auditHistory: AuditHistoryEntry[];
   chatMessages: ChatMessage[];
   chatDraft: string;
   setSelectedService: (service: string) => void;
+  setAuditWindow: (window: string) => void;
   setTheme: (theme: "dark" | "light") => void;
   addAuditHistory: (entry: AuditHistoryEntry) => void;
   addChatMessage: (message: ChatMessage) => void;
@@ -37,11 +39,13 @@ export const useGuardianStore = create<GuardianState>()(
   persist(
     (set) => ({
       selectedService: "_all_",
+      auditWindow: "5m",
       theme: "dark",
       auditHistory: [],
       chatMessages: [],
       chatDraft: "",
       setSelectedService: (service) => set({ selectedService: service }),
+      setAuditWindow: (window) => set({ auditWindow: window }),
       setTheme: (theme) => set({ theme }),
       addAuditHistory: (entry) =>
         set((state) => ({
@@ -58,6 +62,7 @@ export const useGuardianStore = create<GuardianState>()(
       name: "guardian-frontend-state",
       partialize: (state) => ({
         selectedService: state.selectedService,
+        auditWindow: state.auditWindow,
         theme: state.theme,
         auditHistory: state.auditHistory,
         chatMessages: state.chatMessages,

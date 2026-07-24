@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/Users/hardik/telemetry-health-guardian/demo-agent-app/app.py", line 26, in <module>
+    import chaos  # noqa: E402
+    ^^^^^^^^^^^^
+  File "/Users/hardik/telemetry-health-guardian/demo-agent-app/chaos.py", line 95, in <module>
+    from otel_griptape.semconv import GEN_AI_USAGE_INPUT_TOKENS, GEN_AI_USAGE_OUTPUT_TOKENS
+ModuleNotFoundError: No module named 'otel_griptape'

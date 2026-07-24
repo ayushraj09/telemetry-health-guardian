@@ -89,10 +89,13 @@ export function getAuditReport(service: string): Promise<AuditCycle> {
   return request(`/audit/report/${encodeURIComponent(service)}`);
 }
 
-export function runAudit(service?: string | null): Promise<AuditCycle> {
+export function runAudit(service?: string | null, timeRange?: string | null): Promise<AuditCycle> {
   return request("/audit/run", {
     method: "POST",
-    body: JSON.stringify({ service: service === "_all_" ? null : service ?? null }),
+    body: JSON.stringify({
+      service: service === "_all_" ? null : service ?? null,
+      time_range: timeRange ?? null,
+    }),
   });
 }
 
