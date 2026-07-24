@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useQueries } from "@tanstack/react-query";
+import NumberFlow from "@number-flow/react";
 import { RuleDistributionBar } from "@/components/charts/rule-distribution-bar";
 import { RuleLegend } from "@/components/product/rule-legend";
 import { Badge } from "@/components/ui/badge";
@@ -73,7 +74,7 @@ export default function RulesPage() {
                     <td className="mono">{Math.round(row.score)}</td>
                     <td><RuleDistributionBar counts={row.counts} /></td>
                     {RULES.map((rule) => (
-                      <td key={rule.id}>{row.counts[rule.id] ? <Badge rule={rule.id}>{row.counts[rule.id]}</Badge> : <span className="muted mono">0</span>}</td>
+                      <td key={rule.id}>{row.counts[rule.id] ? <Badge rule={rule.id}><NumberFlow value={row.counts[rule.id]} /></Badge> : <span className="muted mono">0</span>}</td>
                     ))}
                   </tr>
                 );

@@ -55,14 +55,19 @@ passing an `r7=` value into `combine_results`.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, fields
 from typing import Any
+
+from pydantic import BaseModel
 
 from guardian.llm_client import generate
 from guardian.rules.r1_missing_fields import R1Result
 from guardian.rules.r2_cardinality import R2Result
 from guardian.rules.r3_orphaned_spans import R3Result
 from guardian.rules.r6_silent_truncation import R6Result
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = (
     "You are the Telemetry Health Guardian's reasoning layer. You audit "
@@ -372,3 +377,99 @@ def probable_fixes(findings: AuditFindings) -> dict[str, str]:
         for rule_id in fired_rule_ids(findings)
         if rule_id in RULE_FIX_HINTS
     }
+
+
+# ---------------------------------------------------------------------------
+# Structured segments (Section 7 UI fix) -- one CitedSegment per fired rule
+# so the frontend renders discrete cards instead of parsing prose.
+# ---------------------------------------------------------------------------
+
+class CitedSegment(BaseModel):
+    """One finding-segment the frontend renders as a discrete card."""
+    rule_id: str
+    claim: str
+    evidence: list[str]
+    severity_rank: int
+    detail: str
+
+
+class StructuredChatResponse(BaseModel):
+    """The full structured payload returned alongside the plain-text answer."""
+    segments: list[CitedSegment]
+
+
+STRUCTURED_CHAT_SYSTEM_PROMPT = (
+    "You are the Telemetry Health Guardian's reasoning layer. You audit "
+    "whether an AI agent's OpenTelemetry telemetry can be trusted.\n\n"
+    "You will be given rule engine findings as JSON plus a user question. "
+    "You MUST respond with valid JSON matching this schema exactly:\n"
+    '{"segments": [{"rule_id": "R2", "claim": "...", "evidence": [...], '
+    '"severity_rank": 1, "detail": "..."}]}\n\n'
+    "Rules for each segment:\n"
+    "- rule_id: the rule that fired (e.g. R1, R2, R3, R6, R7)\n"
+    "- claim: one sentence stating the finding, naming the rule ID and "
+    "the specific offending span/attribute\n"
+    "- evidence: list of short strings -- span IDs, trace IDs, attribute "
+    "names, raw values -- drawn only from the JSON given. Never invent one.\n"
+    "- severity_rank: integer starting at 1 (most severe first)\n"
+    "- detail: 2-3 sentences of explanation. Never generic -- always cite "
+    "the specific span/attribute from the JSON.\n\n"
+    "Produce one segment per fired rule. If a rule has multiple distinct "
+    "finding kinds, produce one segment per kind. Order by severity_rank "
+    "ascending (worst first). Do not include any text outside the JSON object."
+)
+
+
+def _build_structured_chat_prompt(findings: AuditFindings, question: str) -> str:
+    """Build a prompt that asks the LLM to return structured JSON segments."""
+    payload = json.dumps(findings.to_json_dict(), indent=2, default=str)
+    fired = fired_rule_ids(findings)
+    fired_str = ", ".join(fired) if fired else "(none)"
+
+    return (
+        f"Rule engine findings for service {findings.service or '(all services)'}:\n\n"
+        f"```json\n{payload}\n```\n\n"
+        f"Rules that fired: {fired_str}\n\n"
+        f"User question: {question}\n\n"
+        "Respond with ONLY valid JSON matching the schema described in the system "
+        "prompt. No markdown fences, no explanation outside the JSON."
+        f"{_fix_hints_block(fired)}"
+    )
+
+
+def answer_question_structured(
+    findings: AuditFindings, question: str, provider: str | None = None
+) -> list[dict[str, Any]]:
+    """Call the LLM for structured segments. Falls back to an empty list
+    on parse failure (the caller always has the plain-text answer as backup)."""
+    fired = fired_rule_ids(findings)
+    if not fired:
+        return []
+
+    prompt = _build_structured_chat_prompt(findings, question)
+    try:
+        raw = generate(
+            prompt,
+            system=STRUCTURED_CHAT_SYSTEM_PROMPT,
+            provider=provider,
+            temperature=0.1,
+        )
+        # Strip markdown fences if the LLM wraps them anyway
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            cleaned = cleaned.strip()
+
+        parsed = json.loads(cleaned)
+        response = StructuredChatResponse.model_validate(parsed)
+        return [seg.model_dump() for seg in response.segments]
+    except Exception:  # noqa: BLE001 -- structured output is best-effort
+        logger.warning(
+            "Structured segment extraction failed for service=%r; "
+            "falling back to plain-text answer only.",
+            findings.service,
+            exc_info=True,
+        )
+        return []

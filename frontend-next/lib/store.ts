@@ -30,6 +30,7 @@ type GuardianState = {
   addAuditHistory: (entry: AuditHistoryEntry) => void;
   addChatMessage: (message: ChatMessage) => void;
   setChatDraft: (draft: string) => void;
+  clearChat: () => void;
 };
 
 export const useGuardianStore = create<GuardianState>()(
@@ -51,6 +52,7 @@ export const useGuardianStore = create<GuardianState>()(
           chatMessages: [...state.chatMessages, message].slice(-30),
         })),
       setChatDraft: (draft) => set({ chatDraft: draft }),
+      clearChat: () => set({ chatMessages: [], chatDraft: "" }),
     }),
     {
       name: "guardian-frontend-state",

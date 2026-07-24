@@ -40,6 +40,7 @@ the standing report, not re-auditing per question.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -50,11 +51,18 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from guardian.health_score import HealthScoreResult
 from guardian.mcp_client import SignozMCPClient, SignozMCPError
-from guardian.narrative import AuditFindings, answer_question, probable_fixes, validate_citations
+from guardian.narrative import (
+    AuditFindings,
+    answer_question,
+    answer_question_structured,
+    probable_fixes,
+    validate_citations,
+)
 from guardian.scheduler import (
     AuditCycleResult,
     AuditStore,
@@ -142,6 +150,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Telemetry Health Guardian", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class AuditRunRequest(BaseModel):
@@ -231,6 +247,10 @@ async def chat(body: ChatRequest) -> dict[str, Any]:
         "service": findings.service,
         "question": body.question,
         "answer": answer,
+        # Structured segments -- one per fired rule, for the frontend to
+        # render as discrete cards instead of parsing the prose blob.
+        # Best-effort: empty list if structured extraction fails.
+        "segments": answer_question_structured(findings, body.question),
         # Best-effort signal (see narrative.py::validate_citations) -- rule
         # IDs that fired in this audit but weren't named in the answer.
         "rules_fired_but_uncited": validate_citations(answer, findings),
@@ -240,3 +260,143 @@ async def chat(body: ChatRequest) -> dict[str, Any]:
         # prose for a fix suggestion.
         "probable_fixes": probable_fixes(findings),
     }
+
+
+# ---------------------------------------------------------------------------
+# Webhook alert receiver + SSE stream (Section 4.5 frontend integration)
+# ---------------------------------------------------------------------------
+# SigNoz sends alert payloads to GUARDIAN_ALERT_WEBHOOK_URL when an alert
+# fires. This endpoint receives those payloads, normalizes them, stores
+# them in-memory, and pushes them to any connected SSE subscribers so the
+# frontend can display live alert notifications.
+
+import time as _time
+from collections import deque
+from typing import AsyncGenerator
+
+from fastapi.responses import StreamingResponse
+
+# In-memory alert store (bounded ring buffer -- last 50 alerts)
+_alerts: deque[dict[str, Any]] = deque(maxlen=50)
+# SSE subscribers: each is an asyncio.Queue that receives new alerts
+_alert_subscribers: list[asyncio.Queue] = []
+
+
+def _normalize_signoz_alert(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize a SigNoz webhook alert payload into a list of alert events.
+
+    SigNoz sends alerts in this shape (confirmed from their webhook docs):
+    {
+      "alerts": [
+        {
+          "status": "firing" | "resolved",
+          "labels": {"alertname": "...", "severity": "...", ...},
+          "annotations": {"description": "...", "summary": "..."},
+          "startsAt": "2024-01-01T00:00:00Z",
+          "endsAt": "...",
+          "fingerprint": "...",
+          ...
+        }
+      ],
+      "commonLabels": {...},
+      "groupLabels": {...},
+      ...
+    }
+
+    We also accept a flat single-alert payload (just the inner alert object)
+    for flexibility with other webhook sources or testing.
+    """
+    alerts_raw = payload.get("alerts")
+    if isinstance(alerts_raw, list):
+        return [_parse_single_alert(a, i) for i, a in enumerate(alerts_raw)]
+    # Treat entire payload as a single alert
+    return [_parse_single_alert(payload, 0)]
+
+
+def _parse_single_alert(alert: dict[str, Any], index: int) -> dict[str, Any]:
+    """Extract a normalized alert event from one SigNoz alert entry."""
+    labels = alert.get("labels", {}) if isinstance(alert.get("labels"), dict) else {}
+    annotations = alert.get("annotations", {}) if isinstance(alert.get("annotations"), dict) else {}
+
+    return {
+        "id": f"{alert.get('fingerprint', '')}-{int(_time.time() * 1000)}-{index}",
+        "status": alert.get("status", "firing"),
+        "alert_name": labels.get("alertname", alert.get("alertname", "Unknown Alert")),
+        "severity": labels.get("severity", alert.get("severity", "warning")),
+        "summary": annotations.get("summary", labels.get("alertname", "Alert triggered")),
+        "description": annotations.get("description", alert.get("description", "")),
+        "rule_id": labels.get("guardian_rule", labels.get("rule", "")),
+        "service": labels.get("service_name", labels.get("service", "")),
+        "starts_at": alert.get("startsAt", ""),
+        "ends_at": alert.get("endsAt", ""),
+        "received_at": _time.time(),
+        "labels": labels,
+    }
+
+
+@app.post("/webhooks/alerts")
+async def receive_webhook_alert(payload: dict[str, Any]) -> dict[str, str]:
+    """Receives alert webhook payloads from SigNoz (or any compatible source).
+    Normalizes the payload, stores alerts, and pushes to SSE subscribers."""
+    events = _normalize_signoz_alert(payload)
+    for event in events:
+        _alerts.appendleft(event)
+        # Push to all SSE subscribers
+        dead: list[asyncio.Queue] = []
+        for queue in _alert_subscribers:
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                dead.append(queue)
+        # Clean up any full/dead queues
+        for q in dead:
+            try:
+                _alert_subscribers.remove(q)
+            except ValueError:
+                pass
+
+    logger.info("Received webhook alert: %d event(s) processed", len(events))
+    return {"status": "ok", "events_processed": str(len(events))}
+
+
+@app.get("/alerts")
+async def get_alerts(limit: int = 20) -> list[dict[str, Any]]:
+    """Returns the most recent alerts from the in-memory store."""
+    return list(_alerts)[:limit]
+
+
+@app.get("/alerts/stream")
+async def alerts_stream() -> StreamingResponse:
+    """SSE endpoint -- the frontend connects here via EventSource to receive
+    live alert notifications as they arrive from webhooks."""
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+        _alert_subscribers.append(queue)
+        try:
+            # Send a connection-established event
+            yield f"event: connected\ndata: {json.dumps({'status': 'connected'})}\n\n"
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield f"event: alert\ndata: {json.dumps(event, default=str)}\n\n"
+                except asyncio.TimeoutError:
+                    # Send keepalive to prevent connection timeout
+                    yield f"event: ping\ndata: {json.dumps({'ts': _time.time()})}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            try:
+                _alert_subscribers.remove(queue)
+            except ValueError:
+                pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

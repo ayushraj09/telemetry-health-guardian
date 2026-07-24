@@ -17,6 +17,14 @@
   --rule-r3: #f2545b;
   --rule-r6: #c792ea;
   --rule-r7: #4fd1c5;
+
+  /* Typography scale */
+  --text-display: 2.25rem;
+  --text-title: 1.125rem;
+  --text-body: 0.9375rem;
+  --text-detail: 0.8125rem;
+  --text-mono: 0.8125rem;
+  --leading-prose: 1.6;
 }
 
 :root[data-theme="light"] {
@@ -38,4 +46,12 @@
   --rule-r3: #c92733;
   --rule-r6: #8f4db6;
   --rule-r7: #087d74;
+
+  /* Typography scale */
+  --text-display: 2.25rem;
+  --text-title: 1.125rem;
+  --text-body: 0.9375rem;
+  --text-detail: 0.8125rem;
+  --text-mono: 0.8125rem;
+  --leading-prose: 1.6;
 }

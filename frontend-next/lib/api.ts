@@ -32,10 +32,19 @@ export type AuditCycle = {
   narrative_error: string | null;
 };
 
+export type CitedSegment = {
+  rule_id: string;
+  claim: string;
+  evidence: string[];
+  severity_rank: number;
+  detail: string;
+};
+
 export type ChatResponse = {
   service: string | null;
   question: string;
   answer: string;
+  segments: CitedSegment[];
   rules_fired_but_uncited: RuleId[];
   probable_fixes: Partial<Record<RuleId, string>>;
 };

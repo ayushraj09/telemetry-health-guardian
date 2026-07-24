@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { ReactNode, useEffect } from "react";
 import "./globals.css";
 import { ApiStatusPill } from "@/components/product/api-status-pill";
+import { AlertNotifications } from "@/components/product/alert-notifications";
 import { Button } from "@/components/ui/button";
 import { Combobox } from "@/components/ui/combobox";
 import { CommandPalette } from "@/components/ui/command";
@@ -50,6 +51,7 @@ function Chrome({ children }: { children: ReactNode }) {
           {theme === "dark" ? "Light theme" : "Dark theme"}
         </Button>
         <ApiStatusPill />
+        <AlertNotifications />
       </aside>
       <main className="main-panel">{children}</main>
     </div>
