@@ -81,7 +81,7 @@ flowchart TB
         SCHED["scheduler.py<br/>APScheduler periodic audit loop"]
         RULES["rules/<br/>R1 · R2 · R3 · R6 · R7"]
         LLMLAYER["narrative.py + llm_client.py<br/>LiteLLM: OpenAI or Ollama"]
-        API["main.py<br/>FastAPI: /audit/run · /audit/report · /chat"]
+        API["main.py<br/>FastAPI: /audit/run · /audit/report · /chat · /webhooks/alerts · /alerts/stream"]
         SCHED --> RULES
         RULES --> LLMLAYER
         LLMLAYER --> API
@@ -94,19 +94,21 @@ flowchart TB
     API -->|"writeback.py: health-score metric + issue logs (direct OTLP)"| SIGNOZ
     API -->|"writeback.py: alert rules + notification channel (MCP)"| MCP
 
-    UI["frontend/app.py (Streamlit)<br/>health report + chat"]
+    UI["frontend-next/ (Next.js)<br/>dashboard + chat + live alerts"]
     API --> UI
+    API -->|"SSE /alerts/stream"| UI
 
     SIGNOZ --> DASH[SigNoz Dashboards]
     SIGNOZ --> ALERTS[SigNoz Alerts]
+    ALERTS -->|"webhook POST"| API
 ```
 
 **Data flow:** target app (and `citation_service.py`) emit spans →
 `otel-griptape` shapes them correctly → SigNoz Cloud ingests them → Guardian
 queries SigNoz *only* via the hosted MCP endpoint for reads → rule engine
 (R1/R2/R3/R6/R7) + LLM produce a health report → Guardian writes the report
-back to SigNoz → dashboards, alerts, and a thin chat UI surface it to a
-human.
+back to SigNoz → dashboards, alerts, and the Next.js frontend surface it to
+a human.
 
 ### Write-back mechanism: metrics/logs vs. alerts
 
@@ -124,6 +126,16 @@ These are two genuinely different mechanisms, not interchangeable:
   `ensure_alerts` in the same file): real MCP tool calls
   (`signoz_create_notification_channel`, `signoz_create_alert`), same as
   every other MCP write in this project.
+
+### Webhook alerts → frontend notifications
+
+When `GUARDIAN_ALERT_WEBHOOK_URL` is set (point it at your Guardian
+backend's own `/webhooks/alerts` endpoint, e.g.
+`http://localhost:8000/webhooks/alerts`), SigNoz sends alert payloads to
+the Guardian when rules fire. The backend normalizes these and pushes them
+to connected frontends via Server-Sent Events (`GET /alerts/stream`). The
+frontend displays them as live toast notifications and a persistent alert
+panel in the sidebar.
 
 Emitted metrics: `telemetry.health_score`, `telemetry.missing_field_rate_pct`,
 `telemetry.cardinality_risk_score`, `telemetry.orphaned_span_rate_pct`,
@@ -220,7 +232,7 @@ telemetry-health-guardian/
 │   ├── planner.py                     # Stage 1
 │   ├── fetch_and_read.py              # Stage 2 — full-text extraction, no truncation
 │   ├── fact_check_and_cite.py         # Stage 3 — concurrent claim checks; R3 site; routes to citation_service.py
-│   ├── report_writer.py               # Stage 4
+│   ├── report_writer.py              # Stage 4
 │   ├── citation_service.py            # separate HTTP service (own port/service name) — R7 site
 │   ├── chaos.py                       # seeded fault injection: R1/R2/R3/R6/R7 triggers
 │   ├── ollama_r6.py                   # R6's real-Ollama-truncation claim-check path
@@ -230,7 +242,7 @@ telemetry-health-guardian/
 │
 ├── guardian/
 │   ├── README.md                      # see this for module-by-module + API docs
-│   ├── main.py                        # FastAPI app: /health, /audit/run, /audit/report/{service}, /chat
+│   ├── main.py                        # FastAPI app: /health, /audit/run, /audit/report, /chat, /webhooks/alerts, /alerts, /alerts/stream
 │   ├── scheduler.py                   # APScheduler audit loop + AuditStore cache
 │   ├── mcp_client.py                  # SigNoz MCP session wrapper (cloud primary, self-host fallback)
 │   ├── rules/
@@ -241,7 +253,7 @@ telemetry-health-guardian/
 │   │   ├── r7_cross_service_breaks.py
 │   │   └── types.py                   # AuditWindow
 │   ├── llm_client.py                  # LiteLLM OpenAI/Ollama abstraction
-│   ├── narrative.py                   # combines rule results into cited natural-language reports
+│   ├── narrative.py                   # combines rule results into cited natural-language reports + structured segments
 │   ├── health_score.py
 │   ├── writeback.py                   # metrics/logs (direct OTLP) + alerts/notification channel (MCP)
 │   ├── scripts/provision_dashboards.py
@@ -250,13 +262,28 @@ telemetry-health-guardian/
 │   └── tests/                         # test_r1..r7, test_health_score, test_llm_client,
 │                                       # test_narrative, test_main, test_scheduler
 │
-├── frontend/
-│   ├── app.py                         # Streamlit: health report view + chat view
-│   └── requirements.txt
+├── frontend-next/                     # Next.js dashboard + chat + live alerts
+│   ├── app/
+│   │   ├── layout.tsx                 # app shell with sidebar nav + alert notifications
+│   │   ├── page.tsx                   # overview: health ring, service grid, findings rail
+│   │   ├── chat/page.tsx              # structured chat with segment cards + fix panel
+│   │   ├── rules/page.tsx             # rule explorer: cross-service findings table
+│   │   ├── about/page.tsx             # architecture explanation
+│   │   └── service/[name]/page.tsx    # per-service detail view
+│   ├── components/
+│   │   ├── charts/                    # health-ring (animated), score-sparkline, distribution-bar
+│   │   ├── product/                   # chat-message, probable-fix-panel, alert-notifications, finding-row
+│   │   └── ui/                        # badge, button, card, accordion, toast, combobox, command
+│   ├── lib/
+│   │   ├── api.ts                     # typed API client (ChatResponse with CitedSegment, AuditCycle)
+│   │   ├── store.ts                   # Zustand persisted state
+│   │   ├── rule-meta.ts              # rule ID/color/label metadata
+│   │   └── query-client.ts           # TanStack Query provider
+│   ├── styles/tokens.css              # design tokens (colors, typography scale)
+│   └── package.json                   # Next.js 15, React 19, motion, @number-flow/react, TanStack Query
 │
 └── experiments/                       # per-stage verification drivers + build notes
     ├── stage_wise_guidance.txt
-    ├── stage7_notes.txt
     └── test_stage3.py … test_stage8.py
 ```
 
@@ -267,11 +294,16 @@ telemetry-health-guardian/
 ```bash
 cp env.example .env   # fill in SigNoz Cloud MCP creds + at least one LLM provider
 
+# Backend + rule engine
 pip install -r requirements.txt
 pip install -e otel-griptape
 pip install -e guardian[test]
 pip install -r demo-agent-app/requirements.txt
-pip install -r frontend/requirements.txt
+
+# Frontend
+cd frontend-next
+npm install
+cd ..
 ```
 
 `env.example` covers: SigNoz Cloud MCP (`SIGNOZ_INSTANCE_URL`,
@@ -283,16 +315,11 @@ cloud-vs-self-hosted switch), the OTLP export target for the demo app
 `OPENAI_API_KEY`, `OPENAI_MODEL`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL`), the
 Guardian service (`AUDIT_INTERVAL_MINUTES`, `FASTAPI_PORT`,
 `AUDIT_SERVICES`, `AUDIT_WINDOW`, `GUARDIAN_ALERT_WEBHOOK_URL`), the
-frontend (`GUARDIAN_API_URL`), `citation_service.py`
-(`CITATION_SERVICE_URL`, `CITATION_SERVICE_PORT`,
+frontend (`GUARDIAN_API_URL`, `NEXT_PUBLIC_GUARDIAN_API_URL`),
+`citation_service.py` (`CITATION_SERVICE_URL`, `CITATION_SERVICE_PORT`,
 `CITATION_SERVICE_TIMEOUT_SECONDS`), and `ollama_r6.py`'s own call timeout
 (`OLLAMA_R6_TIMEOUT_SECONDS`, separate from the Guardian's own
 `LLM_PROVIDER=ollama` path but pointed at the same `OLLAMA_BASE_URL`).
-`guardian/scheduler.py` defaults `AUDIT_WINDOW` to `5m` if unset — the
-shipped `env.example` sets it to `1h`, so back-to-back demo/chaos runs
-done more than a few minutes apart can land in the same audit window; run
-the pipeline immediately before auditing, or narrow `AUDIT_WINDOW`, if you
-want a single run isolated.
 
 R6's Ollama-routed path additionally needs a local Ollama instance with the
 configured model pulled:
@@ -327,9 +354,28 @@ cd ..
 # start the backend
 uvicorn guardian.main:app --reload --port 8000
 
-# (optional) start the frontend
-streamlit run frontend/app.py
+# start the frontend
+cd frontend-next
+npm run dev
 ```
+
+The frontend runs at `http://localhost:3000` by default.
+
+### Live alert notifications
+
+To enable live alert notifications in the frontend:
+
+1. Set `GUARDIAN_ALERT_WEBHOOK_URL=http://localhost:8000/webhooks/alerts` in
+   your `.env` file
+2. Restart the Guardian backend — it will provision the notification channel
+   in SigNoz pointing at itself
+3. When alerts fire in SigNoz, they POST to `/webhooks/alerts`, which
+   pushes events to all connected frontends via SSE
+
+The frontend's sidebar bell icon shows a live connection indicator and
+displays incoming alerts as toasts + a scrollable alert panel.
+
+### Chaos mode
 
 `chaos.py`'s triggers, each independently rated (`CHAOS_MODE=1` required for
 any of them to fire):
@@ -343,6 +389,8 @@ any of them to fire):
 | R7 | `CHAOS_R7_RATE` | 0.5 | sends one citation-service call with no `traceparent` header |
 
 `CHAOS_SEED` makes a run reproducible.
+
+---
 
 ## Verifying against a live audit
 
