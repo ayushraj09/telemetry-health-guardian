@@ -112,16 +112,7 @@ export function AlertNotifications() {
 
   return (
     <div className="alert-notifications">
-      <button
-        type="button"
-        className="alert-bell-button"
-        onClick={togglePanel}
-        aria-label={`Alerts${firingCount ? ` (${firingCount} active)` : ""}`}
-      >
-        {hasNew || firingCount > 0 ? <BellRing size={18} /> : <Bell size={18} />}
-        {firingCount > 0 && <span className="alert-count-badge">{firingCount}</span>}
-        {connected && <span className="alert-connected-dot" />}
-      </button>
+      
 
       <AnimatePresence>
         {open && (
