@@ -1,60 +1,30 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
-  Bell,
-  BellRing,
-  ChevronDown,
   FileText,
   Loader2,
   Play,
-  Upload,
   X,
-  Zap,
 } from "lucide-react";
-import { AnimatePresence, motion } from "motion/react";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { AutosizingTextarea } from "@/components/ui/autosizing-textarea";
 import { useToast } from "@/components/ui/toast";
+import { listOllamaModels } from "@/lib/demo-agent-client";
 import { RULES, type RuleId } from "@/lib/rule-meta";
 
 const DEMO_API_BASE =
   process.env.NEXT_PUBLIC_DEMO_AGENT_API_URL ?? "http://localhost:8001";
-const GUARDIAN_API_BASE =
-  process.env.NEXT_PUBLIC_GUARDIAN_API_URL ?? "http://localhost:8000";
 
 const DEFAULT_PDF_NAME = "fixtures/long_climate_report.pdf";
-const DEFAULT_QUESTION = "What does the report say about climate risk?";
-
-const AUDIT_WINDOW_OPTIONS = [
-  { value: "5m", label: "5 minutes" },
-  { value: "15m", label: "15 minutes" },
-  { value: "30m", label: "30 minutes" },
-  { value: "1h", label: "1 hour" },
-];
+const DEFAULT_QUESTION = "What does the Kestrel Basin report say about sea level rise and drought?";
 
 type RuleConfig = {
   enabled: boolean;
   rate: number;
   // R6-specific
   ollamaModel?: string;
-  numCtx?: number;
-};
-
-type AlertEvent = {
-  id: string;
-  status: "firing" | "resolved";
-  alert_name: string;
-  severity: string;
-  summary: string;
-  description: string;
-  rule_id: string;
-  service: string;
-  starts_at: string;
-  ends_at: string;
-  received_at: number;
-  labels: Record<string, string>;
 };
 
 function defaultRuleConfigs(): Record<RuleId, RuleConfig> {
@@ -62,17 +32,22 @@ function defaultRuleConfigs(): Record<RuleId, RuleConfig> {
     R1: { enabled: true, rate: 0.3 },
     R2: { enabled: true, rate: 1.0 },
     R3: { enabled: true, rate: 0.3 },
-    R6: { enabled: true, rate: 1.0, ollamaModel: "llama3.2", numCtx: 2048 },
+    R6: { enabled: true, rate: 1.0, ollamaModel: "llama3.2" },
     R7: { enabled: true, rate: 0.5 },
   };
 }
 
-function timeAgo(ts: number): string {
-  const seconds = Math.floor(Date.now() / 1000 - ts);
-  if (seconds < 60) return `${seconds}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  return `${Math.floor(seconds / 3600)}h ago`;
+function getAgentReport(result: Record<string, unknown>): string {
+  return typeof result.report === "string" ? result.report : JSON.stringify(result, null, 2);
 }
+
+let retainedAgentResponse:
+  | {
+      question: string;
+      result: Record<string, unknown>;
+      view: "rendered" | "raw";
+    }
+  | null = null;
 
 export default function DemoAgentPage() {
   // --- PDF state ---
@@ -81,13 +56,14 @@ export default function DemoAgentPage() {
   const activePdf = uploadedFile ? uploadedFile.name : DEFAULT_PDF_NAME;
 
   // --- Question ---
-  const [question, setQuestion] = useState(DEFAULT_QUESTION);
-
-  // --- Audit window ---
-  const [auditWindow, setAuditWindow] = useState("5m");
+  const [question, setQuestion] = useState(retainedAgentResponse?.question ?? DEFAULT_QUESTION);
 
   // --- Chaos ---
   const [chaosMode, setChaosMode] = useState(true);
+
+  // --- Ollama discovery ---
+  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
+  const [ollamaLoading, setOllamaLoading] = useState(true);
 
   // --- Rule configs ---
   const [ruleConfigs, setRuleConfigs] = useState<Record<RuleId, RuleConfig>>(
@@ -96,83 +72,15 @@ export default function DemoAgentPage() {
 
   // --- Execution state ---
   const [isRunning, setIsRunning] = useState(false);
-  const [agentResult, setAgentResult] = useState<Record<string, unknown> | null>(null);
-  const [auditResult, setAuditResult] = useState<Record<string, unknown> | null>(null);
+  const [agentResult, setAgentResult] = useState<Record<string, unknown> | null>(
+    retainedAgentResponse?.result ?? null
+  );
   const [executionError, setExecutionError] = useState<string | null>(null);
-
-  // --- Notifications ---
-  const [alerts, setAlerts] = useState<AlertEvent[]>([]);
-  const [notifOpen, setNotifOpen] = useState(false);
-  const [sseConnected, setSseConnected] = useState(false);
-  const [hasNewAlert, setHasNewAlert] = useState(false);
-  const [notifPermission, setNotifPermission] = useState<NotificationPermission>("default");
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const [agentResponseView, setAgentResponseViewState] = useState<"rendered" | "raw">(
+    retainedAgentResponse?.view ?? "rendered"
+  );
 
   const toast = useToast();
-
-  // --- Request browser notification permission ---
-  useEffect(() => {
-    if (typeof Notification !== "undefined") {
-      setNotifPermission(Notification.permission);
-    }
-  }, []);
-
-  function requestNotifPermission() {
-    if (typeof Notification !== "undefined" && Notification.permission === "default") {
-      Notification.requestPermission().then((perm) => {
-        setNotifPermission(perm);
-      });
-    }
-  }
-
-  // --- SSE for alerts ---
-  useEffect(() => {
-    // Fetch existing alerts
-    fetch(`${GUARDIAN_API_BASE}/alerts`)
-      .then((res) => res.json())
-      .then((data: AlertEvent[]) => {
-        if (Array.isArray(data)) setAlerts(data.slice(0, 50));
-      })
-      .catch(() => {});
-
-    const es = new EventSource(`${GUARDIAN_API_BASE}/alerts/stream`);
-    eventSourceRef.current = es;
-
-    es.addEventListener("connected", () => setSseConnected(true));
-
-    es.addEventListener("alert", (event) => {
-      try {
-        const alert: AlertEvent = JSON.parse(event.data);
-        setAlerts((prev) => [alert, ...prev].slice(0, 50));
-        setHasNewAlert(true);
-
-        toast.push({
-          title: `${alert.status === "resolved" ? "\u2713 Resolved" : "\u26A0 Alert"}: ${alert.alert_name}`,
-          detail: alert.summary || alert.description,
-          tone: alert.status === "resolved" ? "ok" : "error",
-        });
-
-        // Browser notification
-        if (typeof Notification !== "undefined" && Notification.permission === "granted") {
-          new Notification(
-            `${alert.status === "resolved" ? "Resolved" : "Alert"}: ${alert.alert_name}`,
-            {
-              body: `[${alert.rule_id?.toUpperCase()}] ${alert.severity} — ${alert.summary || alert.description}`,
-              tag: alert.id,
-            }
-          );
-        }
-      } catch {}
-    });
-
-    es.addEventListener("ping", () => {});
-    es.onerror = () => setSseConnected(false);
-
-    return () => {
-      es.close();
-      eventSourceRef.current = null;
-    };
-  }, [toast]);
 
   // --- Rule config helpers ---
   function toggleRule(ruleId: RuleId) {
@@ -196,19 +104,66 @@ export default function DemoAgentPage() {
     }));
   }
 
-  function updateR6NumCtx(numCtx: number) {
-    setRuleConfigs((prev) => ({
-      ...prev,
-      R6: { ...prev.R6, numCtx },
-    }));
+  function setAgentResponseView(view: "rendered" | "raw") {
+    setAgentResponseViewState(view);
+    if (retainedAgentResponse) {
+      retainedAgentResponse = { ...retainedAgentResponse, view };
+    }
   }
+
+  function handleQuestionChange(value: string) {
+    setQuestion(value);
+    if (retainedAgentResponse && value !== retainedAgentResponse.question) {
+      retainedAgentResponse = null;
+      setAgentResult(null);
+      setExecutionError(null);
+      setAgentResponseViewState("rendered");
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function refreshOllamaModels() {
+      setOllamaLoading(true);
+      try {
+        const models = await listOllamaModels();
+        if (cancelled) {
+          return;
+        }
+        setOllamaModels(models);
+      } finally {
+        if (!cancelled) {
+          setOllamaLoading(false);
+        }
+      }
+    }
+
+    void refreshOllamaModels();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!ollamaModels.length) {
+      return;
+    }
+
+    const currentModel = ruleConfigs.R6.ollamaModel ?? "";
+    if (!currentModel || !ollamaModels.includes(currentModel)) {
+      updateR6Model(ollamaModels[0]);
+    }
+  }, [ollamaModels, ruleConfigs.R6.ollamaModel]);
 
   // --- Run Live Agent ---
   async function handleRunAgent() {
     setIsRunning(true);
     setAgentResult(null);
-    setAuditResult(null);
     setExecutionError(null);
+    setAgentResponseViewState("rendered");
+    retainedAgentResponse = null;
 
     try {
       // Build chaos env config
@@ -229,7 +184,6 @@ export default function DemoAgentPage() {
             )
           ));
         }
-        formData.append("audit_window", auditWindow);
         response = await fetch(`${DEMO_API_BASE}/run/upload`, {
           method: "POST",
           body: formData,
@@ -244,7 +198,6 @@ export default function DemoAgentPage() {
             rule_configs: chaosMode
               ? Object.fromEntries(enabledRules.map(([id, cfg]) => [id, cfg]))
               : undefined,
-            audit_window: auditWindow,
           }),
         });
       }
@@ -256,22 +209,8 @@ export default function DemoAgentPage() {
 
       const data = await response.json();
       setAgentResult(data);
+      retainedAgentResponse = { question, result: data, view: "rendered" };
       toast.push({ title: "Agent run complete", detail: "Results displayed below." });
-
-      // Now trigger an audit with the selected window
-      try {
-        const auditRes = await fetch(`${GUARDIAN_API_BASE}/audit/run`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ service: null, time_range: auditWindow }),
-        });
-        if (auditRes.ok) {
-          const auditData = await auditRes.json();
-          setAuditResult(auditData);
-        }
-      } catch {
-        // Audit is best-effort
-      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
       setExecutionError(msg);
@@ -281,138 +220,102 @@ export default function DemoAgentPage() {
     }
   }
 
-  const firingCount = alerts.filter((a) => a.status === "firing").length;
-
   return (
     <div className="content-stack">
       <header className="page-header">
         <div>
           <p className="eyebrow">Demo Agent</p>
-          <h1>Run the AI agent pipeline end-to-end.</h1>
+          <h1>Run the AI agent.</h1>
         </div>
       </header>
 
-      {/* Controls Grid */}
-      <div className="demo-agent-grid">
-        {/* Left column: inputs */}
-        <div className="demo-agent-controls">
-          {/* PDF Selector */}
-          <Card>
-            <CardHeader>
-              <CardTitle>PDF Source</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="pdf-selector-row">
-                <button
-                  className="input-like"
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <FileText size={16} /> {activePdf}
-                </button>
-                {uploadedFile && (
+      <div className="demo-agent-layout">
+        <Card className="demo-agent-workspace">
+          <div className="demo-agent-workspace-grid">
+            <section className="demo-agent-inputs" aria-label="Agent inputs">
+              <div className="demo-agent-section">
+                <h2 className="card-title">PDF Source</h2>
+                <div className="pdf-selector-row">
                   <button
-                    className="btn-icon-sm"
+                    className="input-like"
                     type="button"
-                    title="Remove uploaded PDF"
-                    onClick={() => setUploadedFile(null)}
+                    onClick={() => fileInputRef.current?.click()}
                   >
-                    <X size={14} />
+                    <FileText size={16} /> {activePdf}
                   </button>
-                )}
-              </div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf"
-                className="sr-only"
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) setUploadedFile(file);
-                  e.target.value = "";
-                }}
-              />
-              <p className="text-detail" style={{ marginTop: 8 }}>
-                Click to upload a custom PDF, or use the default fixture.
-              </p>
-            </CardContent>
-          </Card>
-
-          {/* Question */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Question</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <input
-                className="input"
-                value={question}
-                onChange={(e) => setQuestion(e.target.value)}
-                placeholder="Ask the agent a question..."
-              />
-            </CardContent>
-          </Card>
-
-          {/* Audit Window */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Audit Window</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <select
-                className="select"
-                value={auditWindow}
-                onChange={(e) => setAuditWindow(e.target.value)}
-              >
-                {AUDIT_WINDOW_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-              <p className="text-detail" style={{ marginTop: 8 }}>
-                Time window for the Guardian audit after the agent run.
-              </p>
-            </CardContent>
-          </Card>
-
-          {/* Chaos Toggle */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Chaos Mode</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <label className="toggle-row">
+                  {uploadedFile && (
+                    <button
+                      className="btn-icon-sm"
+                      type="button"
+                      title="Remove uploaded PDF"
+                      onClick={() => setUploadedFile(null)}
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
                 <input
-                  type="checkbox"
-                  checked={chaosMode}
-                  onChange={(e) => setChaosMode(e.target.checked)}
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".pdf"
+                  className="sr-only"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) setUploadedFile(file);
+                    e.target.value = "";
+                  }}
                 />
-                <span>
-                  {chaosMode ? "Enabled" : "Disabled"} — inject telemetry faults
-                </span>
-              </label>
-            </CardContent>
-          </Card>
+                <p className="text-detail">
+                  Click to upload a custom PDF, or use the default fixture.
+                </p>
+              </div>
 
-          {/* Rule Configuration */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Rule Configuration</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="rule-config-list">
+              <div className="demo-agent-section">
+                <h2 className="card-title">Question</h2>
+                <AutosizingTextarea
+                  className="question-input"
+                  value={question}
+                  onChange={(e) => handleQuestionChange(e.target.value)}
+                  placeholder="Ask the agent a question..."
+                />
+              </div>
+            </section>
+
+            <section
+              className={`demo-agent-chaos r6-card-shell ${!ollamaModels.length && !ollamaLoading ? "is-offline" : ""}`}
+              aria-label="Chaos mode and rule configuration"
+            >
+              <div className="chaos-config-header">
+                <div>
+                  <h2 className="card-title">Chaos Mode</h2>
+                  <p className="text-detail">Rule configuration</p>
+                </div>
+                <label className="toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={chaosMode}
+                    onChange={(e) => setChaosMode(e.target.checked)}
+                  />
+                  <span>{chaosMode ? "Enabled" : "Disabled"}</span>
+                </label>
+              </div>
+
+              <div className="rule-config-grid">
                 {RULES.map((rule) => {
                   const cfg = ruleConfigs[rule.id];
+                  const r6Offline = rule.id === "R6" && !ollamaModels.length && !ollamaLoading;
                   return (
-                    <div key={rule.id} className="rule-config-item">
+                    <div
+                      key={rule.id}
+                      className={`rule-config-item rule-config-item-${rule.id.toLowerCase()} ${r6Offline ? "is-offline" : ""}`}
+                    >
                       <div className="rule-config-header">
                         <label className="toggle-row">
                           <input
                             type="checkbox"
                             checked={cfg.enabled}
                             onChange={() => toggleRule(rule.id)}
-                            disabled={!chaosMode}
+                            disabled={!chaosMode || r6Offline}
                           />
                           <span
                             className="rule-badge"
@@ -424,7 +327,7 @@ export default function DemoAgentPage() {
                         </label>
                       </div>
                       {cfg.enabled && chaosMode && (
-                        <div className="rule-config-params">
+                        <div className={`rule-config-params ${r6Offline ? "is-offline" : ""}`}>
                           <label className="param-field">
                             <span className="param-label">Rate</span>
                             <input
@@ -434,36 +337,46 @@ export default function DemoAgentPage() {
                               max={1}
                               step={0.1}
                               value={cfg.rate}
+                              disabled={r6Offline}
                               onChange={(e) =>
                                 updateRuleRate(rule.id, parseFloat(e.target.value) || 0)
                               }
                             />
                           </label>
                           {rule.id === "R6" && (
-                            <>
-                              <label className="param-field">
-                                <span className="param-label">Ollama Model</span>
-                                <input
-                                  type="text"
-                                  className="input narrow"
-                                  value={cfg.ollamaModel ?? "llama3.2"}
-                                  onChange={(e) => updateR6Model(e.target.value)}
-                                />
-                              </label>
-                              <label className="param-field">
-                                <span className="param-label">num_ctx</span>
-                                <input
-                                  type="number"
-                                  className="input narrow"
-                                  min={256}
-                                  step={256}
-                                  value={cfg.numCtx ?? 2048}
-                                  onChange={(e) =>
-                                    updateR6NumCtx(parseInt(e.target.value) || 2048)
-                                  }
-                                />
-                              </label>
-                            </>
+                            <div
+                              className={`r6-stack ${ollamaModels.length ? "online" : "offline"}`}
+                            >
+                              <p className="text-detail r6-help">
+                                {ollamaLoading
+                                  ? "Checking Ollama..."
+                                  : ollamaModels.length
+                                    ? "Ollama is available."
+                                    : "Ollama is not running or no models are installed."}
+                              </p>
+                              {!ollamaModels.length && !ollamaLoading && (
+                                <div className="r6-commands">
+                                  <div className="command-pill mono">ollama serve</div>
+                                  <div className="command-pill mono">ollama pull llama3.2</div>
+                                </div>
+                              )}
+                              {ollamaModels.length > 0 && (
+                                <label className="param-field r6-model-field">
+                                  <span className="param-label">Model</span>
+                                  <select
+                                    className="select narrow"
+                                    value={cfg.ollamaModel ?? ollamaModels[0]}
+                                    onChange={(e) => updateR6Model(e.target.value)}
+                                  >
+                                    {ollamaModels.map((model) => (
+                                      <option key={model} value={model}>
+                                        {model}
+                                      </option>
+                                    ))}
+                                  </select>
+                                </label>
+                              )}
+                            </div>
                           )}
                         </div>
                       )}
@@ -471,10 +384,9 @@ export default function DemoAgentPage() {
                   );
                 })}
               </div>
-            </CardContent>
-          </Card>
+            </section>
+          </div>
 
-          {/* Run Button */}
           <Button
             disabled={isRunning || !question.trim()}
             onClick={handleRunAgent}
@@ -491,136 +403,59 @@ export default function DemoAgentPage() {
               </>
             )}
           </Button>
-        </div>
+        </Card>
 
-        {/* Right column: results + notifications */}
-        <div className="demo-agent-results">
-          {/* Execution Status */}
-          {isRunning && (
-            <Card>
-              <CardContent>
-                <div className="execution-status">
-                  <Loader2 size={20} className="spin" />
-                  <span>Agent is running... This may take up to 3 minutes.</span>
-                </div>
-              </CardContent>
-            </Card>
-          )}
-
-          {executionError && (
-            <div className="callout error">
-              <span>{executionError}</span>
-            </div>
-          )}
-
-          {/* Agent Response */}
-          {agentResult && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Agent Response</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <pre className="mono result-pre">
-                  {JSON.stringify(agentResult, null, 2)}
-                </pre>
-              </CardContent>
-            </Card>
-          )}
-
-          {/* Guardian Findings */}
-          {auditResult && (
-            <Card>
-              <CardHeader>
-                <CardTitle>Guardian Findings</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <pre className="mono result-pre">
-                  {JSON.stringify(auditResult, null, 2)}
-                </pre>
-              </CardContent>
-            </Card>
-          )}
-
-          {/* Webhook Notifications */}
+        {isRunning && (
           <Card>
-            <CardHeader>
-              <CardTitle>
-                <span className="notif-header-row">
-                  {firingCount > 0 ? (
-                    <BellRing size={18} />
-                  ) : (
-                    <Bell size={18} />
-                  )}
-                  Live Alerts
-                  {firingCount > 0 && (
-                    <span className="alert-count-inline">{firingCount}</span>
-                  )}
-                  <span
-                    className={`sse-dot ${sseConnected ? "connected" : "disconnected"}`}
-                  />
-                </span>
-              </CardTitle>
-              {notifPermission !== "granted" && (
-                <button
-                  type="button"
-                  className="button button-secondary"
-                  onClick={requestNotifPermission}
-                  style={{ fontSize: "0.75rem" }}
-                >
-                  Enable browser notifications
-                </button>
-              )}
-            </CardHeader>
             <CardContent>
-              <div className="alert-history-list">
-                {alerts.length === 0 ? (
-                  <div className="empty-state">
-                    No alerts yet. Alerts will appear here when rules fire during
-                    or after an agent run.
-                  </div>
-                ) : (
-                  alerts.map((alert) => (
-                    <div
-                      key={alert.id}
-                      className={`alert-history-item ${alert.status}`}
-                    >
-                      <div className="alert-history-header">
-                        <span className={`alert-status-dot ${alert.status}`} />
-                        <span className="alert-history-name">
-                          {alert.alert_name}
-                        </span>
-                        {alert.rule_id && (
-                          <span
-                            className="rule-badge"
-                            style={{
-                              background: RULES.find(
-                                (r) =>
-                                  r.id === alert.rule_id?.toUpperCase()
-                              )?.color ?? "var(--text-muted)",
-                            }}
-                          >
-                            {alert.rule_id.toUpperCase()}
-                          </span>
-                        )}
-                        <span className="alert-severity-tag">
-                          {alert.severity}
-                        </span>
-                        <span className="text-detail">
-                          {timeAgo(alert.received_at)}
-                        </span>
-                      </div>
-                      {(alert.summary || alert.description) && (
-                        <p className="text-detail" style={{ marginTop: 4 }}>
-                          {alert.summary || alert.description}
-                        </p>
-                      )}
-                    </div>
-                  ))
-                )}
+              <div className="execution-status">
+                <Loader2 size={20} className="spin" />
+                <span>Agent is running...</span>
               </div>
             </CardContent>
           </Card>
-        </div>
+        )}
+
+        {executionError && (
+          <div className="callout error">
+            <span>{executionError}</span>
+          </div>
+        )}
+
+        {agentResult && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Agent Response</CardTitle>
+              <div className="segmented-control" aria-label="Agent response view">
+                <button
+                  type="button"
+                  className={agentResponseView === "rendered" ? "active" : ""}
+                  onClick={() => setAgentResponseView("rendered")}
+                >
+                  Rendered
+                </button>
+                <button
+                  type="button"
+                  className={agentResponseView === "raw" ? "active" : ""}
+                  onClick={() => setAgentResponseView("raw")}
+                >
+                  Raw
+                </button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              {agentResponseView === "raw" ? (
+                <pre className="mono result-pre">
+                  {JSON.stringify(agentResult, null, 2)}
+                </pre>
+              ) : (
+                <div className="agent-report-text">
+                  {getAgentReport(agentResult)}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
       </div>
     </div>
   );

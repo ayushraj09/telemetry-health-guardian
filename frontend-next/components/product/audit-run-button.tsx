@@ -4,17 +4,8 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
-import { firedRuleIds, GuardianApiError, runAudit, serviceLabel } from "@/lib/api";
+import { AUDIT_WINDOWS, firedRuleIds, GuardianApiError, runAudit, serviceLabel } from "@/lib/api";
 import { useGuardianStore } from "@/lib/store";
-
-const AUDIT_WINDOWS = [
-  { value: "5m", label: "5 min" },
-  { value: "15m", label: "15 min" },
-  { value: "30m", label: "30 min" },
-  { value: "1h", label: "1 hour" },
-  { value: "6h", label: "6 hours" },
-  { value: "24h", label: "24 hours" },
-];
 
 export function AuditRunButton({ service }: { service?: string | null }) {
   const selectedService = useGuardianStore((state) => state.selectedService);

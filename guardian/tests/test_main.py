@@ -124,7 +124,7 @@ def test_audit_run_triggers_a_cycle_and_returns_serialized_result(client, monkey
     assert body["narrative"] == "all clean"
 
 
-def test_audit_run_defaults_to_all_services_scope_with_no_body(client, monkeypatch):
+def test_audit_run_defaults_to_demo_agent_app_with_no_body(client, monkeypatch):
     seen = []
 
     async def fake_run_audit_cycle(service, store, writeback=None, **kwargs):
@@ -138,7 +138,7 @@ def test_audit_run_defaults_to_all_services_scope_with_no_body(client, monkeypat
     resp = client.post("/audit/run", json={})
 
     assert resp.status_code == 200
-    assert seen == [None]
+    assert seen == ["demo-agent-app"]
 
 
 def test_audit_run_maps_mcp_error_to_502(client, monkeypatch):
@@ -170,43 +170,48 @@ def test_audit_report_returns_cached_result(client):
     assert resp.json()["service"] == "demo-agent-app"
 
 
-def test_audit_report_accepts_all_alias_for_no_scope(client):
-    result = _clean_result(None)
-
-    import asyncio
-
-    asyncio.run(guardian_main.store.set(None, result))
-
-    resp = client.get("/audit/report/all")
-
-    assert resp.status_code == 200
-    assert resp.json()["service"] is None
-
-
-def test_chat_uses_cached_findings_and_returns_answer(client, monkeypatch):
+def test_audit_report_maps_all_alias_to_demo_agent_app(client):
     result = _clean_result("demo-agent-app")
 
     import asyncio
 
     asyncio.run(guardian_main.store.set("demo-agent-app", result))
 
+    resp = client.get("/audit/report/all")
+
+    assert resp.status_code == 200
+    assert resp.json()["service"] == "demo-agent-app"
+
+
+def test_chat_refreshes_audit_and_returns_answer(client, monkeypatch):
+    calls = []
+
+    async def fake_run_audit_cycle(service, store, writeback=None, **kwargs):
+        calls.append((service, kwargs))
+        result = _clean_result(service)
+        await store.set(service, result)
+        return result
+
     def fake_answer_question(findings, question, provider=None):
         assert findings.service == "demo-agent-app"
         return f"Answer to: {question}"
 
+    monkeypatch.setattr(guardian_main, "run_audit_cycle", fake_run_audit_cycle)
     monkeypatch.setattr(guardian_main, "answer_question", fake_answer_question)
+    monkeypatch.setattr(guardian_main, "answer_question_structured", lambda findings, question: [])
     monkeypatch.setattr(guardian_main, "validate_citations", lambda answer, findings: [])
 
-    resp = client.post("/chat", json={"question": "why is it clean?", "service": "demo-agent-app"})
+    resp = client.post("/chat", json={"question": "why is it clean?", "service": "demo-agent-app", "time_range": "30m"})
 
     assert resp.status_code == 200
     body = resp.json()
     assert body["answer"] == "Answer to: why is it clean?"
     assert body["rules_fired_but_uncited"] == []
     assert body["probable_fixes"] == {}
+    assert calls == [("demo-agent-app", {"generate_narrative": False, "time_range": "30m"})]
 
 
-def test_chat_runs_a_fresh_audit_when_nothing_cached(client, monkeypatch):
+def test_chat_defaults_audit_refresh_to_demo_agent_app(client, monkeypatch):
     calls = []
 
     async def fake_run_audit_cycle(service, store, writeback=None, **kwargs):
@@ -217,24 +222,25 @@ def test_chat_runs_a_fresh_audit_when_nothing_cached(client, monkeypatch):
 
     monkeypatch.setattr(guardian_main, "run_audit_cycle", fake_run_audit_cycle)
     monkeypatch.setattr(guardian_main, "answer_question", lambda findings, question, provider=None: "ok")
+    monkeypatch.setattr(guardian_main, "answer_question_structured", lambda findings, question: [])
     monkeypatch.setattr(guardian_main, "validate_citations", lambda answer, findings: [])
 
-    resp = client.post("/chat", json={"question": "anything wrong?", "service": "demo-agent-app"})
+    resp = client.post("/chat", json={"question": "anything wrong?"})
 
     assert resp.status_code == 200
     assert calls == ["demo-agent-app"]
 
 
 def test_chat_maps_llm_failure_to_502(client, monkeypatch):
-    result = _clean_result("demo-agent-app")
-
-    import asyncio
-
-    asyncio.run(guardian_main.store.set("demo-agent-app", result))
+    async def fake_run_audit_cycle(service, store, writeback=None, **kwargs):
+        result = _clean_result(service)
+        await store.set(service, result)
+        return result
 
     def fake_answer_question(findings, question, provider=None):
         raise RuntimeError("provider unreachable")
 
+    monkeypatch.setattr(guardian_main, "run_audit_cycle", fake_run_audit_cycle)
     monkeypatch.setattr(guardian_main, "answer_question", fake_answer_question)
 
     resp = client.post("/chat", json={"question": "why?", "service": "demo-agent-app"})

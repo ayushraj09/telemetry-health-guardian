@@ -7,7 +7,8 @@ stage1_chaos_output.txt
 *.pdf
 # Ignore all __pycache__ folders recursively
 **/__pycache__/
-
+logs/*
+run_backend.sh
 # Ignore individual compiled Python bytecode files
 *.pyc
 *.pyo

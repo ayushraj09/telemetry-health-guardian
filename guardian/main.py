@@ -66,6 +66,7 @@ from guardian.narrative import (
 from guardian.scheduler import (
     AuditCycleResult,
     AuditStore,
+    DEFAULT_SERVICE,
     build_scheduler,
     configured_services,
     run_audit_cycle,
@@ -75,21 +76,18 @@ from guardian.writeback import HealthWriteback, ensure_alerts, ensure_notificati
 logging.basicConfig(level=os.getenv("GUARDIAN_LOG_LEVEL", "INFO"))
 logger = logging.getLogger("guardian.main")
 
-# Literal path segments a caller can use for the "no service scope" (all
-# services combined) audit -- `scheduler.service_key(None)` produces
-# `"_all_"` internally; `"all"` is accepted too since it reads more
-# naturally in a URL from the Streamlit frontend (Section 4.6).
+# Legacy aliases accepted by older frontend builds. They now resolve to the
+# only service this app owns.
 _NO_SCOPE_ALIASES = {"_all_", "all"}
 
 
-def _resolve_service_arg(service: str) -> str | None:
-    """Path-param `service` -> the `service: str | None` argument every
-    rule module / `AuditWindow` / `AuditStore` actually expects."""
-    return None if service in _NO_SCOPE_ALIASES else service
+def _resolve_service_arg(service: str | None) -> str:
+    """Normalize route/body service inputs to the single supported service."""
+    return DEFAULT_SERVICE if not service or service in _NO_SCOPE_ALIASES else service
 
 
 store = AuditStore()
-_state: dict[str, Any] = {"writeback": None, "scheduler": None}
+_state: dict[str, Any] = {"writeback": None, "scheduler": None, "alert_task": None}
 
 
 async def _provision_alerts_if_configured() -> None:
@@ -110,6 +108,16 @@ async def _provision_alerts_if_configured() -> None:
         logger.exception("Alert provisioning failed at startup -- continuing without alerts.")
 
 
+async def _provision_alerts_in_background() -> None:
+    timeout = float(os.getenv("GUARDIAN_ALERT_PROVISION_TIMEOUT_SECONDS", "30"))
+    try:
+        await asyncio.wait_for(_provision_alerts_if_configured(), timeout=timeout)
+    except TimeoutError:
+        logger.warning("Alert provisioning did not finish within %.1fs; continuing without blocking the API.", timeout)
+    except Exception:  # noqa: BLE001 -- alerts are best-effort and must not block the API
+        logger.exception("Alert provisioning failed in background -- continuing without alerts.")
+
+
 async def _run_initial_audits(services: list[str | None], writeback: HealthWriteback) -> None:
     for svc in services:
         try:
@@ -123,7 +131,7 @@ async def lifespan(app: FastAPI):
     writeback = HealthWriteback()
     _state["writeback"] = writeback
 
-    await _provision_alerts_if_configured()
+    _state["alert_task"] = asyncio.create_task(_provision_alerts_in_background())
 
     services = configured_services()
     # Fire the first cycle in the background rather than awaiting it here --
@@ -146,6 +154,9 @@ async def lifespan(app: FastAPI):
     finally:
         if _state["scheduler"] is not None:
             _state["scheduler"].shutdown(wait=False)
+        alert_task = _state.get("alert_task")
+        if isinstance(alert_task, asyncio.Task) and not alert_task.done():
+            alert_task.cancel()
         writeback.flush()
 
 
@@ -168,6 +179,7 @@ class AuditRunRequest(BaseModel):
 class ChatRequest(BaseModel):
     question: str
     service: str | None = None
+    time_range: str | None = None
 
 
 def _serialize_cycle(result: AuditCycleResult) -> dict[str, Any]:
@@ -193,7 +205,7 @@ async def health() -> dict[str, str]:
 
 @app.post("/audit/run")
 async def audit_run(body: AuditRunRequest | None = None) -> dict[str, Any]:
-    service = body.service if body else None
+    service = _resolve_service_arg(body.service if body else None)
     time_range = body.time_range if body else None
     writeback: HealthWriteback | None = _state["writeback"]
     try:
@@ -223,20 +235,21 @@ async def audit_report(service: str) -> dict[str, Any]:
 
 @app.post("/chat")
 async def chat(body: ChatRequest) -> dict[str, Any]:
-    service = body.service
-    result = await store.get(service)
-    if result is None:
-        # No cached audit yet for this service (see module docstring) --
-        # run one now rather than telling the user to go call /audit/run
-        # first themselves.
-        writeback: HealthWriteback | None = _state["writeback"]
-        try:
-            result = await run_audit_cycle(service, store, writeback=writeback)
-        except SignozMCPError as exc:
-            raise HTTPException(status_code=502, detail=f"SigNoz MCP call failed: {exc}") from exc
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Fallback audit run for chat failed for service=%r", service)
-            raise HTTPException(status_code=500, detail=f"Could not audit service before answering: {exc}") from exc
+    service = _resolve_service_arg(body.service)
+    writeback: HealthWriteback | None = _state["writeback"]
+    try:
+        result = await run_audit_cycle(
+            service,
+            store,
+            writeback=writeback,
+            generate_narrative=False,
+            time_range=body.time_range,
+        )
+    except SignozMCPError as exc:
+        raise HTTPException(status_code=502, detail=f"SigNoz MCP call failed: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Audit refresh for chat failed for service=%r", service)
+        raise HTTPException(status_code=500, detail=f"Could not audit service before answering: {exc}") from exc
 
     findings: AuditFindings = result.findings
     try:

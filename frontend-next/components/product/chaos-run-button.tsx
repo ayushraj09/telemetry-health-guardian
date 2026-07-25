@@ -9,7 +9,7 @@ import { runDemoAgent } from "@/lib/demo-agent-client";
 import { useGuardianStore } from "@/lib/store";
 
 const DEMO_SERVICE = "demo-agent-app";
-const DEFAULT_QUESTION = "What does the report say about climate risk?";
+const DEFAULT_QUESTION = "What does the Kestrel Basin report say about sea level rise and drought?";
 
 export function ChaosRunButton({ mode }: { mode: "baseline" | "chaos" }) {
   const addAuditHistory = useGuardianStore((state) => state.addAuditHistory);

@@ -10,19 +10,17 @@ import { NarrativePanel } from "@/components/product/narrative-panel";
 import { RuleLegend } from "@/components/product/rule-legend";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs } from "@/components/ui/tabs";
-import { getAuditReport, ruleFindingCount, ruleResultKey, serviceLabel } from "@/lib/api";
+import { PRIMARY_SERVICE, getAuditReport, ruleFindingCount, ruleResultKey, serviceLabel } from "@/lib/api";
 import { RULES, type RuleId } from "@/lib/rule-meta";
 import { useGuardianStore } from "@/lib/store";
 
 export default function ServiceDetailPage() {
   const params = useParams<{ name: string }>();
   const service = decodeURIComponent(params.name);
-  if (!service) {
+  if (!service || service !== PRIMARY_SERVICE) {
     notFound();
   }
-  const history = useGuardianStore((state) => state.auditHistory).filter((entry) =>
-    service === "_all_" ? !entry.service : entry.service === service,
-  );
+  const history = useGuardianStore((state) => state.auditHistory).filter((entry) => entry.service === service);
   const report = useQuery({ queryKey: ["audit", service], queryFn: () => getAuditReport(service), retry: 0 });
   const cycle = report.data;
   const tabs = RULES.map((rule) => ({ id: rule.id, label: rule.id, count: ruleFindingCount(cycle, rule.id) }));

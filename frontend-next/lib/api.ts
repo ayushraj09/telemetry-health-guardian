@@ -1,11 +1,10 @@
 import type { RuleId } from "./rule-meta";
 
 const API_BASE = process.env.NEXT_PUBLIC_GUARDIAN_API_URL ?? "http://localhost:8000";
+export const PRIMARY_SERVICE = "demo-agent-app";
+export const DEFAULT_GUARDIAN_QUESTION = "What rules fired and what should I fix first?";
 
-export const AUDIT_SERVICES = (process.env.NEXT_PUBLIC_AUDIT_SERVICES ?? "_all_,demo-agent-app")
-  .split(",")
-  .map((service) => service.trim())
-  .filter(Boolean);
+export const AUDIT_SERVICES = [PRIMARY_SERVICE];
 
 export type RuleResult = {
   findings: Record<string, unknown>[];
@@ -49,6 +48,15 @@ export type ChatResponse = {
   probable_fixes: Partial<Record<RuleId, string>>;
 };
 
+export const AUDIT_WINDOWS = [
+  { value: "5m", label: "5 min" },
+  { value: "15m", label: "15 min" },
+  { value: "30m", label: "30 min" },
+  { value: "1h", label: "1 hour" },
+  { value: "6h", label: "6 hours" },
+  { value: "24h", label: "24 hours" },
+];
+
 export class GuardianApiError extends Error {
   status: number;
 
@@ -86,29 +94,37 @@ export function checkHealth(): Promise<{ status: string }> {
 }
 
 export function getAuditReport(service: string): Promise<AuditCycle> {
-  return request(`/audit/report/${encodeURIComponent(service)}`);
+  return request(`/audit/report/${encodeURIComponent(normalizeService(service))}`);
 }
 
 export function runAudit(service?: string | null, timeRange?: string | null): Promise<AuditCycle> {
   return request("/audit/run", {
     method: "POST",
     body: JSON.stringify({
-      service: service === "_all_" ? null : service ?? null,
+      service: normalizeService(service),
       time_range: timeRange ?? null,
     }),
   });
 }
 
-export function askGuardian(question: string, service?: string | null): Promise<ChatResponse> {
+export function askGuardian(question: string, service?: string | null, timeRange?: string | null): Promise<ChatResponse> {
   return request("/chat", {
     method: "POST",
-    body: JSON.stringify({ question, service: service === "_all_" ? null : service ?? null }),
+    body: JSON.stringify({
+      question,
+      service: normalizeService(service),
+      time_range: timeRange ?? null,
+    }),
   });
 }
 
 export function serviceLabel(service: string | null | undefined): string {
+  return normalizeService(service);
+}
+
+export function normalizeService(service: string | null | undefined): string {
   if (!service || service === "_all_" || service === "all") {
-    return "Fleet";
+    return PRIMARY_SERVICE;
   }
   return service;
 }

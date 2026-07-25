@@ -186,14 +186,14 @@ async def test_run_audit_cycle_calls_writeback_when_provided(monkeypatch):
 # -- configured_services -----------------------------------------------------
 
 
-def test_configured_services_defaults_to_all_services_scope(monkeypatch):
+def test_configured_services_defaults_to_demo_agent_app(monkeypatch):
     monkeypatch.delenv("AUDIT_SERVICES", raising=False)
-    assert scheduler.configured_services() == [None]
+    assert scheduler.configured_services() == ["demo-agent-app"]
 
 
-def test_configured_services_parses_comma_separated_list(monkeypatch):
+def test_configured_services_ignores_multi_service_env(monkeypatch):
     monkeypatch.setenv("AUDIT_SERVICES", "demo-agent-app, citation-service")
-    assert scheduler.configured_services() == ["demo-agent-app", "citation-service"]
+    assert scheduler.configured_services() == ["demo-agent-app"]
 
 
 # -- build_scheduler ----------------------------------------------------------

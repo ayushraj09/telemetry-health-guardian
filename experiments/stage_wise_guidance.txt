@@ -72,7 +72,7 @@ Copy experiments/test_stage7.py to the repo root
     - chaos run: rerun app.py with CHAOS_MODE=1 and all four required rates
     at 1.0 (same command Stage 6's guidance uses), then
     "python test_stage7.py --step chaos"
-    
+
 Stage8:
-CHAOS_MODE=1 CHAOS_R6_RATE=1.0 python app.py --question "..." --pdf fixtures/long_climate_report.pdf
+CHAOS_MODE=1 CHAOS_R1_RATE=1 CHAOS_R2_RATE=1 CHAOS_R3_RATE=1.0 CHAOS_R6_RATE=1.0 CHAOS_R7_RATE=1 CHAOS_SEED=42 python app.py --question "What does the Kestrel Basin report say about sea level rise and drought?" --pdf fixtures/long_climate_report.pdf
 AUDIT_WINDOW=5m python experiments/test_stage8.py --step chaos

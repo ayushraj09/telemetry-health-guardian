@@ -594,5 +594,22 @@ async def ensure_alerts(client: SignozMCPClient, channel_name: str) -> dict[str,
     rule_ids: dict[str, str] = {}
     for key, payload in payloads.items():
         result = await client.call_tool("signoz_create_alert", payload)
-        rule_ids[key] = result.get("ruleId") if isinstance(result, dict) else None
+        rule_ids[key] = _extract_alert_rule_id(result)
     return rule_ids
+
+
+def _extract_alert_rule_id(result: Any) -> str:
+    """Best-effort alert id extraction across MCP response envelopes."""
+    if not isinstance(result, dict):
+        return ""
+    for key in ("ruleId", "id", "alertId"):
+        value = result.get(key)
+        if value:
+            return str(value)
+    for container_key in ("alert", "rule", "data"):
+        container = result.get(container_key)
+        if isinstance(container, dict):
+            nested = _extract_alert_rule_id(container)
+            if nested:
+                return nested
+    return ""

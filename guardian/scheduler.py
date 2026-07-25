@@ -61,6 +61,7 @@ logger = logging.getLogger("guardian.scheduler")
 
 DEFAULT_AUDIT_WINDOW = os.getenv("AUDIT_WINDOW", "5m")
 _NO_SERVICE_SCOPE_KEY = "_all_"  # matches writeback.py's convention for service=None
+DEFAULT_SERVICE = "demo-agent-app"
 
 
 def service_key(service: str | None) -> str:
@@ -169,16 +170,12 @@ async def run_audit_cycle(
 
 
 def configured_services() -> list[str | None]:
-    """`AUDIT_SERVICES` env var -- comma-separated service names to audit
-    each cycle. Unset/empty means one audit covering all services
-    (`service=None`, same default every rule module and
-    `experiments/test_stage6.py` already used) -- the common case for a
-    single-target demo app like this project's, per Section 4.1.
+    """Services to audit each cycle.
+
+    This app currently owns a single service, so scheduled audits always target
+    that service rather than an aggregate/no-scope bucket.
     """
-    raw = os.getenv("AUDIT_SERVICES", "").strip()
-    if not raw:
-        return [None]
-    return [s.strip() for s in raw.split(",") if s.strip()]
+    return [DEFAULT_SERVICE]
 
 
 def build_scheduler(

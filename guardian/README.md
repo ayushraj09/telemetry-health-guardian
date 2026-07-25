@@ -42,8 +42,8 @@ rationale.
 | Route | Method | Behavior |
 |---|---|---|
 | `/health` | GET | Liveness check — `{"status": "ok"}`. |
-| `/audit/run` | POST | Body: `{"service": "<name>" \| null}`. Runs `scheduler.run_audit_cycle` immediately for that service (or all services combined, if omitted/`null`) and returns the serialized result. Maps a `SignozMCPError` to `502`, any other failure to `500`. |
-| `/audit/report/{service}` | GET | Returns whatever `AuditStore` has cached for `service`. `service` also accepts the literal aliases `_all_` or `all` for the no-scope (all-services-combined) audit. `404` if nothing has completed yet for that service. |
+| `/audit/run` | POST | Body: `{"service": "demo-agent-app"}`. Runs `scheduler.run_audit_cycle` immediately for `demo-agent-app` and returns the serialized result. Omitted/legacy aggregate service values are normalized to `demo-agent-app`. Maps a `SignozMCPError` to `502`, any other failure to `500`. |
+| `/audit/report/{service}` | GET | Returns whatever `AuditStore` has cached for `demo-agent-app`. Legacy `_all_` or `all` path values are normalized to `demo-agent-app`. `404` if nothing has completed yet for that service. |
 | `/chat` | POST | Body: `{"question": "...", "service": "<name>" \| null}`. Reads the cached findings for `service` (running one fresh audit cycle only if nothing has ever been cached for it yet — it does not re-audit on every message) and answers via `narrative.answer_question`. Response includes `rules_fired_but_uncited`, `validate_citations`'s best-effort list of rule IDs that fired but weren't named in the LLM's answer. |
 
 `POST /audit/run` and the scheduler's periodic tick call the exact same
@@ -60,7 +60,7 @@ uvicorn guardian.main:app --reload --port 8000
 Startup, per `main.py`'s `lifespan`:
 1. Constructs one `HealthWriteback` (owns this process's OTLP meter/logger providers).
 2. If `GUARDIAN_ALERT_WEBHOOK_URL` is set, provisions the notification channel and the four alerts via MCP once. If unset, this step is skipped with a log line — you can provision them out-of-band instead with `python experiments/test_stage6.py --provision-alerts` (run from the repo root).
-3. Fires one immediate audit cycle per `AUDIT_SERVICES` entry in the background, then starts the recurring `AsyncIOScheduler` loop on top of it.
+3. Fires one immediate audit cycle for `demo-agent-app` in the background, then starts the recurring `AsyncIOScheduler` loop on top of it.
 
 Provision the SigNoz dashboards separately (also one-time):
 

@@ -3,13 +3,14 @@
 import { useState, useRef } from "react";
 import { FileText, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { AutosizingTextarea } from "@/components/ui/autosizing-textarea";
 import { useToast } from "@/components/ui/toast";
 
 const DEMO_API_BASE = process.env.NEXT_PUBLIC_DEMO_AGENT_API_URL ?? "http://localhost:8001";
 const DEFAULT_PDF_NAME = "fixtures/long_climate_report.pdf";
 
 export function DemoAgentPanel() {
-  const [question, setQuestion] = useState("What does the report say about climate risk?");
+  const [question, setQuestion] = useState("What does the Kestrel Basin report say about sea level rise and drought?");
   const [chaosMode, setChaosMode] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [isRunning, setIsRunning] = useState(false);
@@ -92,7 +93,7 @@ export function DemoAgentPanel() {
         </label>
         <label className="field-label">
           Question
-          <input className="input" value={question} onChange={(e) => setQuestion(e.target.value)} />
+          <AutosizingTextarea className="question-input" value={question} onChange={(e) => setQuestion(e.target.value)} />
         </label>
         <label className="field-label checkbox-row">
           <input type="checkbox" checked={chaosMode} onChange={(e) => setChaosMode(e.target.checked)} />

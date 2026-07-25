@@ -7,7 +7,7 @@ import { ServiceCard } from "@/components/product/service-card";
 import { AuditRunButton } from "@/components/product/audit-run-button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { RingSkeleton, Skeleton } from "@/components/ui/skeleton";
-import { AUDIT_SERVICES, getAuditReport, type AuditCycle } from "@/lib/api";
+import { AUDIT_SERVICES, PRIMARY_SERVICE, getAuditReport, type AuditCycle } from "@/lib/api";
 import { useGuardianStore } from "@/lib/store";
 
 function StatTile({ label, value, icon: Icon }: { label: string; value: number; icon: typeof Gauge }) {
@@ -29,9 +29,9 @@ export default function OverviewPage() {
       retry: 0,
     })),
   });
-  const fleetCycle = reports[0]?.data as AuditCycle | undefined;
-  const fleetHistory = history.filter((entry) => !entry.service);
-  const terms = fleetCycle?.health_score.terms ?? {};
+  const serviceCycle = reports[0]?.data as AuditCycle | undefined;
+  const serviceHistory = history.filter((entry) => entry.service === PRIMARY_SERVICE);
+  const terms = serviceCycle?.health_score.terms ?? {};
   const loading = reports.some((report) => report.isLoading);
   const errors = reports.filter((report) => report.isError);
 
@@ -39,10 +39,10 @@ export default function OverviewPage() {
     <div className="content-stack">
       <header className="page-header">
         <div>
-          <p className="eyebrow">Fleet telemetry trust</p>
+          <p className="eyebrow">demo-agent-app telemetry trust</p>
           <h1>Audits that cite the exact rule, span, and attribute.</h1>
         </div>
-        <AuditRunButton service="_all_" />
+        <AuditRunButton service={PRIMARY_SERVICE} />
       </header>
 
       {errors.length ? (
@@ -56,7 +56,7 @@ export default function OverviewPage() {
         {loading ? (
           <Card><CardContent><RingSkeleton /><Skeleton className="wide" /></CardContent></Card>
         ) : (
-          <HealthScoreCard cycle={fleetCycle} history={fleetHistory} />
+          <HealthScoreCard cycle={serviceCycle} history={serviceHistory} />
         )}
         <div className="stat-grid">
           <StatTile icon={Gauge} label="Missing-field %" value={terms.missing_field_rate_pct ?? 0} />
@@ -74,7 +74,7 @@ export default function OverviewPage() {
           {AUDIT_SERVICES.map((service, index) => (
             <ServiceCard
               cycle={reports[index]?.data as AuditCycle | undefined}
-              history={history.filter((entry) => (service === "_all_" ? !entry.service : entry.service === service))}
+              history={history.filter((entry) => entry.service === service)}
               key={service}
               service={service}
             />

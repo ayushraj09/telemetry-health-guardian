@@ -59,6 +59,16 @@ class AuditWindow:
             kwargs["time_range"] = self.time_range
         return kwargs
 
+    def as_time_mcp_kwargs(self) -> dict:
+        """Return only time keys for MCP tools that do not accept service."""
+        kwargs: dict = {}
+        if self.start_ms is not None and self.end_ms is not None:
+            kwargs["start"] = self.start_ms
+            kwargs["end"] = self.end_ms
+        elif self.time_range:
+            kwargs["time_range"] = self.time_range
+        return kwargs
+
     def as_absolute_ms_range(self) -> tuple[int, int]:
         """Resolve this window to an absolute `(start_ms, end_ms)` pair,
         for callers (currently only `r1_missing_fields.fetch_spans`) that

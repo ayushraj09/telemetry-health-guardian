@@ -171,7 +171,7 @@ async def fetch_traces(client: SignozMCPClient, window: AuditWindow) -> list[Tra
     """
     trace_ids = await _list_trace_ids(client, window)
     detail_results = await asyncio.gather(
-        *(client.get_trace_details(trace_id, **window.as_mcp_kwargs()) for trace_id in trace_ids)
+        *(client.get_trace_details(trace_id, **window.as_time_mcp_kwargs()) for trace_id in trace_ids)
     )
     return [
         _parse_trace_details(trace_id, raw)

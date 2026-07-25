@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_PDF = APP_DIR / "fixtures" / "long_climate_report.pdf"
+DEMO_AGENT_SERVICE_NAME = "demo-agent-app"
 
 app = FastAPI(title="Demo Agent API")
 
@@ -99,6 +100,7 @@ def _run_cli(
     rule_configs: dict[str, RuleConfig] | None = None,
 ) -> dict[str, Any]:
     env = os.environ.copy()
+    env["OTEL_SERVICE_NAME"] = DEMO_AGENT_SERVICE_NAME
     if chaos_mode:
         env["CHAOS_MODE"] = "1"
     else:

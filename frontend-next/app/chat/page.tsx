@@ -1,29 +1,31 @@
 "use client";
 
 import { FormEvent, useMemo } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Send, Trash2 } from "lucide-react";
 import { ChatMessage } from "@/components/product/chat-message";
 import { ProbableFixPanel } from "@/components/product/probable-fix-panel";
-import { RecentFindingsRail } from "@/components/product/recent-findings-rail";
 import { SuggestedQuestionChips } from "@/components/product/suggested-question-chips";
-import { AuditRunButton } from "@/components/product/audit-run-button";
 import { Button } from "@/components/ui/button";
-import { askGuardian, getAuditReport } from "@/lib/api";
+import { AUDIT_WINDOWS, askGuardian, getAuditReport } from "@/lib/api";
 import { useGuardianStore } from "@/lib/store";
 
 export default function ChatPage() {
   const selectedService = useGuardianStore((state) => state.selectedService);
+  const auditWindow = useGuardianStore((state) => state.auditWindow);
+  const setAuditWindow = useGuardianStore((state) => state.setAuditWindow);
   const messages = useGuardianStore((state) => state.chatMessages);
   const draft = useGuardianStore((state) => state.chatDraft);
   const setDraft = useGuardianStore((state) => state.setChatDraft);
   const addMessage = useGuardianStore((state) => state.addChatMessage);
   const clearChat = useGuardianStore((state) => state.clearChat);
+  const queryClient = useQueryClient();
   const report = useQuery({ queryKey: ["audit", selectedService], queryFn: () => getAuditReport(selectedService), retry: 0 });
   const mutation = useMutation({
-    mutationFn: (question: string) => askGuardian(question, selectedService),
+    mutationFn: (question: string) => askGuardian(question, selectedService, auditWindow),
     onSuccess: (response) => {
       addMessage({ id: crypto.randomUUID(), role: "assistant", text: response.answer, response });
+      queryClient.invalidateQueries({ queryKey: ["audit", selectedService] });
     },
   });
 
@@ -61,25 +63,35 @@ export default function ChatPage() {
           <p className="eyebrow">Ask Guardian</p>
           <h1>Chat over cited telemetry findings.</h1>
         </div>
-        <AuditRunButton service={selectedService} />
       </header>
-      <RecentFindingsRail />
 
       <div className="chat-layout">
         <div className="content-stack">
           <section className="chat-thread panel">
-            {messages.length ? messages.map((message) => <ChatMessage key={message.id} message={message} />) : <div className="empty-state">Ask why a rule fired, what changed, or which telemetry defect to fix first.</div>}
-            {mutation.isPending ? <div className="chat-message assistant scan"><strong>Guardian</strong><p>Reading the current audit report...</p></div> : null}
-            {mutation.isError ? <div className="callout error">Chat failed: {mutation.error instanceof Error ? mutation.error.message : "unknown error"}</div> : null}
+            <div className="chat-scroll-area">
+              {messages.length ? messages.map((message) => <ChatMessage key={message.id} message={message} />) : <div className="empty-state">Ask why a rule fired, what changed, or which telemetry defect to fix first.</div>}
+              {mutation.isPending ? <div className="chat-message assistant scan"><strong>Guardian</strong><p>Refreshing the audit window and reading current findings...</p></div> : null}
+              {mutation.isError ? <div className="callout error">Chat failed: {mutation.error instanceof Error ? mutation.error.message : "unknown error"}</div> : null}
+            </div>
+            <form className="chat-input" onSubmit={submit}>
+              <input onChange={(event) => setDraft(event.target.value)} placeholder="What rules fired and what should I fix first?" value={draft} />
+              <label className="field-label chat-window-field">
+                Window
+                <select className="select" value={auditWindow} onChange={(event) => setAuditWindow(event.target.value)}>
+                  {AUDIT_WINDOWS.map((window) => (
+                    <option key={window.value} value={window.value}>
+                      {window.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <Button disabled={mutation.isPending} type="submit" variant="primary"><Send size={16} /> Send</Button>
+              {messages.length > 0 && (
+                <Button onClick={clearChat} variant="ghost" type="button" aria-label="Clear chat"><Trash2 size={15} /></Button>
+              )}
+            </form>
           </section>
           <SuggestedQuestionChips cycle={report.data} />
-          <form className="chat-input panel" onSubmit={submit}>
-            <input onChange={(event) => setDraft(event.target.value)} placeholder="Why did the score drop?" value={draft} />
-            <Button disabled={mutation.isPending} type="submit" variant="primary"><Send size={16} /> Send</Button>
-            {messages.length > 0 && (
-              <Button onClick={clearChat} variant="ghost" type="button" aria-label="Clear chat"><Trash2 size={15} /></Button>
-            )}
-          </form>
         </div>
 
         {latestResponse?.probable_fixes && Object.keys(latestResponse.probable_fixes).length > 0 && (
