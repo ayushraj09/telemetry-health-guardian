@@ -47,16 +47,13 @@ the one place this project's writes deliberately don't).
 
 ## What it catches
 
-| ID | Check | Status |
+| ID | Check |
 |---|---|---|
-| **R1** | Missing/incorrect GenAI semantic-convention attributes on `gen_ai.operation.name == "chat"` spans (`gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons`), plus span-naming conformance (`"{operation} {model}"`) | ✅ built |
-| **R2** | Cardinality risk — an attribute key flagged only when **both** `distinct_values/total_spans > 0.8` **and** average value length > 200 bytes hold, avoiding false positives on short high-cardinality fields like `trace_id` | ✅ built |
-| **R3** | Orphaned span trees within a single service — a span whose `parent_span_id` is set but resolves to nothing in the same trace, cross-checked against the window edge to rule out a parent that's simply out of range | ✅ built |
-| **R6** | Silent tool-payload truncation — compares `payload.raw_bytes` against `payload.captured_bytes` (custom attributes `otel-griptape` sets), flags when `captured_bytes < raw_bytes * 0.95` | ✅ built |
-| **R7** | Cross-service trace breaks at agent-to-agent handoffs — an outbound call from `demo-agent-app` to `citation_service.py` that produces a new root span in the callee instead of a continuation of the caller's trace, within a 2-second handoff window | ✅ built |
-| R5 | Raw-content/PII leakage heuristic | ❌ out of scope by explicit design decision — not implemented, stubbed, or scaffolded |
-| ~~R4~~ | Span-naming convention (standalone) | N/A — merged into R1; there is no separate R4 module |
-
+| **R1** | Missing/incorrect GenAI semantic-convention attributes on `gen_ai.operation.name == "chat"` spans (`gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons`), plus span-naming conformance (`"{operation} {model}"`) |
+| **R2** | Cardinality risk — an attribute key flagged only when **both** `distinct_values/total_spans > 0.8` **and** average value length > 200 bytes hold, avoiding false positives on short high-cardinality fields like `trace_id` |
+| **R3** | Orphaned span trees within a single service — a span whose `parent_span_id` is set but resolves to nothing in the same trace, cross-checked against the window edge to rule out a parent that's simply out of range |
+| **R6** | Silent tool-payload truncation — compares `payload.raw_bytes` against `payload.captured_bytes` (custom attributes `otel-griptape` sets), flags when `captured_bytes < raw_bytes * 0.95` |
+| **R7** | Cross-service trace breaks at agent-to-agent handoffs — an outbound call from `demo-agent-app` to `citation_service.py` that produces a new root span in the callee instead of a continuation of the caller's trace, within a 2-second handoff window |
 **Required MVP = R1 + R2 + R3 + R6**, and R7 (originally stretch/optional
 scope, cleared for build once the earlier stages' gates passed) is also
 fully wired end-to-end: rule engine → health-score term → LLM narrative →
