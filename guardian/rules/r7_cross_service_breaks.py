@@ -25,13 +25,18 @@ Detection logic, exactly per spec:
 Design decision (documented, not silent): "a corresponding root span
 appears in B" only tells you something arrived -- it doesn't by itself
 distinguish "correctly continues the caller's trace" from "arrived as a
-disconnected new trace." The literal check this module implements is:
-for each outbound call span in A, look for ANY span in B within the
-handoff window (`HANDOFF_WINDOW_MS`); if the closest one shares A's
-call's `trace_id`, propagation worked (not a finding); if it doesn't (a
-new trace_id shows up in B instead, right when B's response to A's call
-was expected), that is exactly the "one trace silently becomes two
-disconnected ones" case Section 2 describes, and gets flagged. A call
+disconnected new trace." The check this module implements is: for each
+outbound call span in A, look at spans in B within the handoff window
+(`HANDOFF_WINDOW_MS`). If one is a direct continuation of the call (same
+`trace_id`, `parent_span_id` == the call's span_id), propagation worked
+(not a finding). Otherwise, if a new ROOT span under a different
+trace_id shows up in B right when B's response was expected, that is
+exactly the "one trace silently becomes two disconnected ones" case
+Section 2 describes, and gets flagged. Each B span is matched to at most
+one call: the claim checks run concurrently inside one trace, so a
+looser "any same-trace span in window" test let a sibling call's healthy
+continuation mask a broken call next to it (found live, 2026-10-19: 2
+dropped traceparents reported as 0 breaks). A call
 with NO candidate span in B within the window at all is left unevaluated
 (not flagged) rather than treated as a break -- a slow/failed HTTP call,
 network hiccup, or a B service that simply hasn't ingested yet is a
@@ -142,6 +147,16 @@ class R7Result:
     findings: tuple[R7Finding, ...]
 
 
+def _continues(span: PeerSpanRecord, call: OutboundCallSpan) -> bool:
+    """Whether `span` is the callee-side continuation of `call`: same trace
+    and parented directly on the outbound call span. `parent_span_id` is
+    fetched best-effort, so a same-trace span with no parent recorded is
+    accepted on `trace_id` alone rather than misreported as a break."""
+    if span.trace_id != call.trace_id:
+        return False
+    return span.parent_span_id is None or span.parent_span_id == call.span_id
+
+
 def evaluate(
     outbound_calls: list[OutboundCallSpan],
     peer_spans_by_service: dict[str, list[PeerSpanRecord]],
@@ -151,23 +166,42 @@ def evaluate(
     findings: list[R7Finding] = []
     evaluable = 0
 
-    for call in outbound_calls:
+    # Each callee span answers at most one call. Without this, concurrent
+    # calls inside one trace mask each other: a sibling's correctly
+    # propagated span shares the caller's trace_id and lands in the same
+    # window, so a broken call next to it would look healthy, and every
+    # broken call would be pinned to the same nearest new-root span.
+    claimed: set[str] = set()
+
+    for call in sorted(outbound_calls, key=lambda c: c.timestamp_ms):
         candidates = [
             span
             for span in peer_spans_by_service.get(call.peer_service, [])
-            if 0 <= (span.timestamp_ms - call.timestamp_ms) <= HANDOFF_WINDOW_MS
+            if span.span_id not in claimed
+            and 0 <= (span.timestamp_ms - call.timestamp_ms) <= HANDOFF_WINDOW_MS
         ]
-        if not candidates:
-            continue  # nothing observed in-window yet -- not evaluable, not a finding
 
-        evaluable += 1
+        def distance(span: PeerSpanRecord, call: OutboundCallSpan = call) -> int:
+            return span.timestamp_ms - call.timestamp_ms
 
-        if any(span.trace_id == call.trace_id for span in candidates):
+        continuations = [span for span in candidates if _continues(span, call)]
+        if continuations:
+            evaluable += 1
+            claimed.add(min(continuations, key=distance).span_id)
             continue  # correctly propagated -- one connected trace across the handoff
 
-        # No same-trace continuation arrived in-window; the nearest candidate
-        # is a disconnected new trace in B where a continuation was expected.
-        broken = min(candidates, key=lambda span: span.timestamp_ms - call.timestamp_ms)
+        # A disconnected new trace in B: a root span (no parent) under a
+        # different trace_id. Spans continuing some *other* trace belong to a
+        # different caller's healthy handoff, not evidence about this call.
+        new_roots = [
+            span for span in candidates if span.trace_id != call.trace_id and span.parent_span_id is None
+        ]
+        if not new_roots:
+            continue  # nothing attributable to this call in-window -- not evaluable, not a finding
+
+        evaluable += 1
+        broken = min(new_roots, key=distance)
+        claimed.add(broken.span_id)
         findings.append(
             R7Finding(
                 caller_service=call.service,
@@ -396,7 +430,7 @@ async def fetch_outbound_calls(
                             {"name": _PEER_SERVICE_ATTR},
                             {"name": _HTTP_URL_ATTR},
                         ],
-                        "limit": 200,
+                        "limit": 1000,
                     },
                 }
             ],
@@ -459,7 +493,7 @@ async def fetch_peer_spans(
                             {"name": "parent_span_id"},
                             {"name": "name"},
                         ],
-                        "limit": 200,
+                        "limit": 1000,
                     },
                 }
             ],

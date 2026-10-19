@@ -98,13 +98,26 @@ def test_cors_preflight_allows_browser_requests(client, path, method):
     resp = client.options(
         path,
         headers={
-            "Origin": "http://localhost:5173",
+            "Origin": "http://localhost:3000",
             "Access-Control-Request-Method": method,
         },
     )
 
     assert resp.status_code == 200
-    assert resp.headers["access-control-allow-origin"] == "http://localhost:5173"
+    assert resp.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+
+def test_cors_preflight_rejects_unlisted_origins(client):
+    resp = client.options(
+        "/audit/run",
+        headers={
+            "Origin": "https://example.com",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+
+    assert resp.status_code == 400
+    assert "access-control-allow-origin" not in resp.headers
 
 
 def test_audit_run_triggers_a_cycle_and_returns_serialized_result(client, monkeypatch):

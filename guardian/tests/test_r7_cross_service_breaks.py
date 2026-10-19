@@ -94,6 +94,50 @@ def test_multiple_handoffs_only_broken_ones_are_flagged():
     assert result.findings[0].caller_span_id == "call-broken"
 
 
+def test_sibling_continuation_does_not_mask_a_concurrent_broken_call():
+    """Concurrent claim checks share one trace. A broken call must still be
+    flagged when a sibling's correctly propagated span lands in the same
+    window with the same trace_id (the live false negative R7 used to have)."""
+    healthy_call = _call(trace_id="t1", timestamp_ms=1000, span_id="call-healthy")
+    broken_call = _call(trace_id="t1", timestamp_ms=1001, span_id="call-broken")
+    peer_spans = [
+        _peer_span(trace_id="t1", timestamp_ms=1040, parent_span_id="call-healthy", span_id="peer-healthy"),
+        _peer_span(trace_id="t9-disconnected", timestamp_ms=1041, parent_span_id=None, span_id="peer-broken"),
+    ]
+
+    result = evaluate([healthy_call, broken_call], {"citation-service": peer_spans})
+
+    assert result.total_handoffs == 2
+    assert result.broken_handoffs == 1
+    assert result.findings[0].caller_span_id == "call-broken"
+    assert result.findings[0].callee_span_id == "peer-broken"
+
+
+def test_concurrent_broken_calls_each_get_their_own_callee_span():
+    calls = [_call(trace_id="t1", timestamp_ms=1000 + i, span_id=f"call-{i}") for i in range(3)]
+    peer_spans = [
+        _peer_span(trace_id=f"new-{i}", timestamp_ms=1050, parent_span_id=None, span_id=f"peer-{i}")
+        for i in range(3)
+    ]
+
+    result = evaluate(calls, {"citation-service": peer_spans})
+
+    assert result.broken_handoffs == 3
+    assert sorted(f.callee_span_id for f in result.findings) == ["peer-0", "peer-1", "peer-2"]
+
+
+def test_only_other_calls_continuations_in_window_is_unevaluated():
+    """If the only spans in B belong to other callers' healthy handoffs,
+    there's no evidence about this call either way -- not a finding."""
+    call = _call(trace_id="t1", timestamp_ms=1000, span_id="call-mine")
+    other = _peer_span(trace_id="t2", timestamp_ms=1100, parent_span_id="call-other", span_id="peer-other")
+
+    result = evaluate([call], {"citation-service": [other]})
+
+    assert result.total_handoffs == 0
+    assert result.findings == ()
+
+
 def test_r3_and_r7_findings_are_never_the_same_shape():
     """R3 findings describe a broken parent link within one trace; R7
     findings always carry two distinct trace_ids (caller vs callee) --

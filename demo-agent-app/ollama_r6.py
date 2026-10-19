@@ -51,9 +51,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 
 import httpx
 from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 
 from otel_griptape.payload_tracking import byte_length, record_payload_sizes
 from otel_griptape.semconv import (
@@ -70,6 +72,14 @@ tracer = trace.get_tracer(__name__)
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_R6_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_R6_TIMEOUT_SECONDS", "60.0"))
+
+# fact_check_and_cite.py checks claims concurrently, and with
+# CHAOS_R6_RATE=1.0 every one of them lands here at once. A local Ollama
+# instance processes them one at a time anyway, so firing them together
+# just makes the later ones queue past OLLAMA_R6_TIMEOUT_SECONDS (live run,
+# 2026-10-19: 8 of 10 calls timed out). Serializing them here keeps each
+# call's timeout -- and its span duration -- about that call alone.
+_OLLAMA_CALL_LOCK = threading.Lock()
 
 # Deliberately duplicated from fact_check_and_cite.py's CLAIM_CHECK_PROMPT
 # rather than imported -- fact_check_and_cite.py imports this module, so
@@ -123,7 +133,7 @@ def run_claim_check_via_ollama(claim: str, source_text: str) -> dict:
     # "fact_check_and_cite.check_claim_llm") would make every R6-routed
     # claim a spurious R1 naming_convention finding -- a bug in this
     # module, not a real conformance problem in the pipeline.
-    with tracer.start_as_current_span(f"{OPERATION_CHAT} {model}") as span:
+    with _OLLAMA_CALL_LOCK, tracer.start_as_current_span(f"{OPERATION_CHAT} {model}") as span:
         span.set_attribute(GEN_AI_SYSTEM, "ollama")
         span.set_attribute(GEN_AI_OPERATION_NAME, OPERATION_CHAT)
         span.set_attribute(GEN_AI_REQUEST_MODEL, model)
@@ -150,8 +160,14 @@ def run_claim_check_via_ollama(claim: str, source_text: str) -> dict:
             # being unreachable" discipline fact_check_and_cite.py's
             # _fetch_citation already uses. R6's demo depends on this call
             # succeeding, but a real pipeline shouldn't crash if it doesn't.
+            #
+            # No payload sizes are recorded here: nothing reached the model,
+            # so claiming captured_bytes == raw_bytes would tell R6 the full
+            # payload was delivered and hide the failure from its rate.
+            # Leaving them unset drops this span out of R6's denominator.
             span.set_attribute("ollama.error", str(exc))
-            record_payload_sizes(raw_bytes, raw_bytes, span=span)
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR, str(exc)))
             return {"claim": claim, "verdict": "unclear", "citation": ""}
 
         input_tokens = data.get("prompt_eval_count")

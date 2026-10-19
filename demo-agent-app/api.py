@@ -8,6 +8,7 @@ requests.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -24,12 +25,23 @@ from pydantic import BaseModel
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_PDF = APP_DIR / "fixtures" / "long_climate_report.pdf"
 DEMO_AGENT_SERVICE_NAME = "demo-agent-app"
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+# A chaos run with every claim routed through local Ollama checks them one
+# at a time (see ollama_r6.py), so allow well past a single call's timeout.
+RUN_TIMEOUT_SECONDS = float(os.getenv("DEMO_AGENT_RUN_TIMEOUT_SECONDS", "600"))
+# Each run spends LLM credits, so only the dashboard may trigger one from a
+# browser. Comma-separated; override for a different frontend host/port.
+CORS_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv("CORS_ALLOW_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
+    if origin.strip()
+]
 
 app = FastAPI(title="Demo Agent API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -57,6 +69,8 @@ def _safe_pdf_path(pdf_path: str | None) -> Path:
     if not path.is_absolute():
         path = APP_DIR / path
     path = path.resolve()
+    if not path.is_relative_to(APP_DIR):
+        raise HTTPException(status_code=400, detail="PDF must be inside the demo-agent-app directory.")
     if not path.exists():
         raise HTTPException(status_code=400, detail=f"PDF not found: {path}")
     if path.suffix.lower() != ".pdf":
@@ -111,15 +125,24 @@ def _run_cli(
     # Apply per-rule config env vars
     _apply_rule_configs_to_env(env, rule_configs)
 
-    completed = subprocess.run(
-        [sys.executable, "app.py", "--question", question, "--pdf", str(pdf_path)],
-        cwd=APP_DIR,
-        env=env,
-        text=True,
-        capture_output=True,
-        timeout=180,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            [sys.executable, "app.py", "--question", question, "--pdf", str(pdf_path)],
+            cwd=APP_DIR,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=RUN_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                f"Demo agent run did not finish within {RUN_TIMEOUT_SECONDS:.0f}s "
+                "(set DEMO_AGENT_RUN_TIMEOUT_SECONDS to allow longer runs)."
+            ),
+        ) from exc
     if completed.returncode != 0:
         raise HTTPException(status_code=500, detail=completed.stderr.strip() or "Demo agent run failed.")
 
@@ -147,7 +170,10 @@ def _run_cli(
 
 @app.post("/run")
 async def run(body: RunRequest) -> dict[str, Any]:
-    return _run_cli(
+    # The run blocks for minutes; keep it off the event loop so the API
+    # (e.g. /ollama/models) stays responsive meanwhile.
+    return await asyncio.to_thread(
+        _run_cli,
         body.question,
         _safe_pdf_path(body.pdf_path),
         body.chaos_mode,
@@ -181,7 +207,9 @@ async def run_upload(
         temp.write(await uploaded_pdf.read())
         temp_path = Path(temp.name)
     try:
-        return _run_cli(question, temp_path, chaos_mode, ollama_model, rule_configs=parsed_rule_configs)
+        return await asyncio.to_thread(
+            _run_cli, question, temp_path, chaos_mode, ollama_model, rule_configs=parsed_rule_configs
+        )
     finally:
         temp_path.unlink(missing_ok=True)
 
@@ -190,7 +218,7 @@ async def run_upload(
 async def ollama_models() -> list[str]:
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
-            response = await client.get("http://localhost:11434/api/tags")
+            response = await client.get(f"{OLLAMA_BASE_URL}/api/tags")
             response.raise_for_status()
     except httpx.HTTPError:
         return []

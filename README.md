@@ -1,63 +1,47 @@
 # Telemetry Health Guardian
 
-**We don't observe the agent's behavior. We observe whether the observability
-itself is trustworthy — then fix the instrumentation that produces it.**
+**An auditor for observability data itself.** Most tools watch what an AI
+agent *does*. Guardian checks whether the *telemetry describing the agent*
+can be trusted — and points at the instrumentation that broke it.
 
-Telemetry Health Guardian is an auditor for telemetry hygiene. It does not
-watch what an AI agent *does* — it watches whether the *telemetry describing
-what the agent does* can be trusted.
-
-It has two parts:
-
-1. **[`otel-griptape`](otel-griptape/README.md)** — an OpenTelemetry
-   auto-instrumentation library for [Griptape](https://github.com/griptape-ai/griptape),
-   a Python agent framework with no maintained OTel instrumentation package.
-   This library emits *correct* telemetry by construction: GenAI-semconv
-   spans, correct context propagation across sync and thread-pool
-   concurrency, and W3C `traceparent` forwarding across outbound HTTP calls.
-2. **[The Guardian service](guardian/README.md)** (`guardian/`) — an
-   MCP-powered agent that continuously queries [SigNoz](https://signoz.io) —
-   never the target app directly — to detect telemetry defects elsewhere:
-   missing fields, cardinality explosions, broken trace trees, hidden
-   truncation, and severed cross-service handoffs. It scores telemetry
-   health per service, explains findings in plain, cited language, and
-   writes results back into SigNoz as metrics, logs, and alerts.
-
-Both parts run against a concrete demo workload,
-[`demo-agent-app/`](demo-agent-app/README.md): a four-stage **document
-research pipeline** (Planner → Fetch & Read → Fact-Check & Cite → Report
-Writer) chosen because its natural failure modes line up one-to-one with
-what this system detects — most notably a long PDF where only a fraction
-of its content ever reaches the LLM's context, producing a confident,
-wrong report with no error anywhere. That's R6's canonical case, not a
-contrived one.
-
-Each component has its own detailed README covering its modules, API, and
-how to run it in isolation:
-[`otel-griptape/README.md`](otel-griptape/README.md),
-[`guardian/README.md`](guardian/README.md),
-[`demo-agent-app/README.md`](demo-agent-app/README.md).
-
-Rule-engine *reads* go through the **SigNoz MCP server** exclusively — never
-a direct SigNoz API/SDK call that bypasses MCP (see
-[Write-back mechanism](#write-back-mechanism-metrics--logs-vs-alerts) for
-the one place this project's writes deliberately don't).
+Broken telemetry rarely fails loudly. A span loses its parent, a token
+count goes missing, a tool result is silently cut off before it reaches the
+model — and dashboards keep looking fine. Guardian queries
+[SigNoz](https://signoz.io) through the **SigNoz MCP server**, runs five
+detection rules over the stored spans, scores each service 0–100, explains
+the findings in plain language with span-ID citations, and writes the
+results back into SigNoz as metrics, logs, and alerts.
 
 ---
 
-## What it catches
+## Contents
 
-| ID | Check |
-|---|---|---|
-| **R1** | Missing/incorrect GenAI semantic-convention attributes on `gen_ai.operation.name == "chat"` spans (`gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.response.finish_reasons`), plus span-naming conformance (`"{operation} {model}"`) |
-| **R2** | Cardinality risk — an attribute key flagged only when **both** `distinct_values/total_spans > 0.8` **and** average value length > 200 bytes hold, avoiding false positives on short high-cardinality fields like `trace_id` |
-| **R3** | Orphaned span trees within a single service — a span whose `parent_span_id` is set but resolves to nothing in the same trace, cross-checked against the window edge to rule out a parent that's simply out of range |
-| **R6** | Silent tool-payload truncation — compares `payload.raw_bytes` against `payload.captured_bytes` (custom attributes `otel-griptape` sets), flags when `captured_bytes < raw_bytes * 0.95` |
-| **R7** | Cross-service trace breaks at agent-to-agent handoffs — an outbound call from `demo-agent-app` to `citation_service.py` that produces a new root span in the callee instead of a continuation of the caller's trace, within a 2-second handoff window |
-**Required MVP = R1 + R2 + R3 + R6**, and R7 (originally stretch/optional
-scope, cleared for build once the earlier stages' gates passed) is also
-fully wired end-to-end: rule engine → health-score term → LLM narrative →
-SigNoz writeback → dashboard panel → alert.
+- [Components](#components)
+- [Architecture](#architecture)
+- [The rules](#the-rules)
+- [Health score](#health-score)
+- [Chaos injection](#chaos-injection)
+- [Setup](#setup)
+- [Reproducing an audit](#reproducing-an-audit)
+- [API reference](#api-reference)
+- [Repository layout](#repository-layout)
+- [Known limitations](#known-limitations)
+
+---
+
+## Components
+
+| Component | What it is |
+|---|---|
+| [`otel-griptape/`](otel-griptape/README.md) | OpenTelemetry auto-instrumentation for the [Griptape](https://github.com/griptape-ai/griptape) agent framework, which has no maintained OTel package. Emits GenAI semantic-convention spans, propagates context across threads, and forwards W3C `traceparent` on outbound HTTP. Installs standalone and works with any OTel backend. |
+| [`demo-agent-app/`](demo-agent-app/README.md) | The workload under audit: a four-stage document research pipeline (**Planner → Fetch & Read → Fact-Check & Cite → Report Writer**), plus a separate `citation_service` and a seeded fault injector (`chaos.py`). |
+| [`guardian/`](guardian/README.md) | The auditor: a FastAPI service that runs the rule engine on a schedule, computes health scores, generates LLM narratives, answers questions via chat, and writes results back to SigNoz. |
+| `frontend-next/` | Next.js dashboard: per-service health, findings, rule trends, chat, and a panel for triggering demo/chaos runs. |
+
+The demo pipeline was chosen because its natural failure modes map onto the
+rules. The clearest example: a 35-page PDF where only part of the text ever
+reaches the model's context window, producing a confident, wrong answer
+with no error anywhere — exactly what R6 exists to catch.
 
 ---
 
@@ -65,130 +49,368 @@ SigNoz writeback → dashboard panel → alert.
 
 ```mermaid
 flowchart TB
-    subgraph TargetApp["Target Application Layer"]
-        A["demo-agent-app (Griptape)<br/>Planner → Fetch&Read → Fact-Check&Cite → Report Writer"]
-        A -->|wrapped calls| LIB["otel-griptape<br/>auto-instrumentation library"]
-        A -->|"outbound HTTP<br/>(traceparent forwarded, unless R7 chaos fires)"| CITE["citation_service.py<br/>separate service, own OTel service.name"]
+    subgraph Target["Target application"]
+        A["demo-agent-app<br/>Planner → Fetch&Read → Fact-Check&Cite → Report Writer"]
+        A -->|instrumented by| LIB["otel-griptape"]
+        A -->|"HTTP + traceparent"| CITE["citation_service<br/>(separate service)"]
     end
 
-    LIB -->|OTLP gRPC/HTTP| SIGNOZ[(SigNoz Cloud<br/>ClickHouse + Query Service)]
+    LIB -->|OTLP| SIGNOZ[(SigNoz Cloud)]
     CITE -->|OTLP| SIGNOZ
+    SIGNOZ <--> MCP{{"SigNoz MCP server"}}
 
-    subgraph Guardian["Telemetry Health Guardian service"]
-        SCHED["scheduler.py<br/>APScheduler periodic audit loop"]
-        RULES["rules/<br/>R1 · R2 · R3 · R6 · R7"]
-        LLMLAYER["narrative.py + llm_client.py<br/>LiteLLM: OpenAI or Ollama"]
-        API["main.py<br/>FastAPI: /audit/run · /audit/report · /chat"]
-        SCHED --> RULES
-        RULES --> LLMLAYER
-        LLMLAYER --> API
+    subgraph Guardian["Guardian service"]
+        SCHED["scheduler.py<br/>periodic audit loop"] --> RULES["rules/<br/>R1 · R2 · R3 · R6 · R7"]
+        RULES --> SCORE["health_score.py"]
+        SCORE --> LLM["narrative.py<br/>LiteLLM: OpenAI or Ollama"]
+        LLM --> API["main.py (FastAPI)"]
     end
 
-    MCP{{"SigNoz MCP<br/>cloud-hosted endpoint"}}
-    SIGNOZ <--> MCP
-    MCP <-->|"signoz_* tool calls (reads)"| RULES
-
-    API -->|"writeback.py: health-score metric + issue logs (direct OTLP)"| SIGNOZ
-    API -->|"writeback.py: alert rules + notification channel (MCP)"| MCP
-
-    UI["frontend-next (Next.js)<br/>health report + chat"]
-    API --> UI
-
-    SIGNOZ --> DASH[SigNoz Dashboards]
-    SIGNOZ --> ALERTS[SigNoz Alerts]
+    MCP -->|"all reads"| RULES
+    API -->|"metrics + logs (OTLP)"| SIGNOZ
+    API -->|"alert rules (MCP)"| MCP
+    API --> UI["frontend-next"]
 ```
 
-**Data flow:** target app (and `citation_service.py`) emit spans →
-`otel-griptape` shapes them correctly → SigNoz Cloud ingests them → Guardian
-queries SigNoz *only* via the hosted MCP endpoint for reads → rule engine
-(R1/R2/R3/R6/R7) + LLM produce a health report → Guardian writes the report
-back to SigNoz → dashboards, alerts, and a thin chat UI surface it to a
-human.
+**Data flow**
 
-### Write-back mechanism: metrics/logs vs. alerts
+1. The demo app and `citation_service` emit spans; `otel-griptape` shapes
+   them to the GenAI semantic conventions.
+2. SigNoz Cloud ingests them over OTLP.
+3. Guardian reads spans **only through the SigNoz MCP server** — never a
+   direct SigNoz API call.
+4. The rule engine produces findings → a health score → an LLM narrative
+   that cites span IDs.
+5. Guardian writes back to SigNoz:
+   - **Metrics and logs** via direct OTLP. The MCP server cannot write raw
+     telemetry; its writable resources are dashboards, alerts, notification
+     channels, and saved views.
+   - **Alert rules and notification channel** via MCP
+     (`signoz_create_alert`, `signoz_create_notification_channel`).
 
-These are two genuinely different mechanisms, not interchangeable:
-
-- **Health-score metric + issue logs** (`guardian/writeback.py`'s
-  `HealthWriteback`): direct OTLP export, the same mechanism
-  `demo-agent-app/telemetry.py` already uses for spans. The SigNoz MCP
-  server has no `signoz_write_metric` / `signoz_create_log` tool — the only
-  MCP-writable resources are dashboards, alert rules, notification channels,
-  and saved views, not raw telemetry — so direct OTLP is the only mechanism
-  that can put a metric or log into SigNoz at all. All rule-engine *reads*
-  still go through MCP exclusively.
-- **Alert rules + notification channel** (`ensure_notification_channel`,
-  `ensure_alerts` in the same file): real MCP tool calls
-  (`signoz_create_notification_channel`, `signoz_create_alert`), same as
-  every other MCP write in this project.
-
-Emitted metrics: `telemetry.health_score`, `telemetry.missing_field_rate_pct`,
+Metrics emitted: `telemetry.health_score`, `telemetry.missing_field_rate_pct`,
 `telemetry.cardinality_risk_score`, `telemetry.orphaned_span_rate_pct`,
 `telemetry.truncation_rate_pct`, `telemetry.cross_service_break_rate_pct`.
 
-Alerts provisioned at Guardian startup (only if `GUARDIAN_ALERT_WEBHOOK_URL`
-is set — otherwise this step is skipped with a log line):
-- Threshold: health score < 70 for any service
-- Anomaly: sudden cardinality-risk spike on any attribute key
-- Threshold: truncation rate > 5% for any tool
-- Threshold: cross-service break rate > 0% for any service pair — any
-  occurrence flagged, since a broken handoff silently splits one trace
-  into two
+---
 
-### Health score (per service, 0–100)
+## The rules
+
+Every rule module in `guardian/rules/` has the same shape:
+
+- **`evaluate(...)`** — pure detection logic over plain Python data. Fully
+  unit-tested with no network or SigNoz needed.
+- **`fetch_*(...)` / `run(...)`** — a thin adapter that pulls the data via
+  MCP tools (mostly `signoz_execute_builder_query` with explicit
+  `selectFields`, because the convenience search tools omit custom
+  attributes from their rows).
+
+Each result reports its **denominator** (e.g. `total_gen_ai_spans`), so
+"found nothing to check" is always distinguishable from "checked and
+healthy".
+
+### R1 — Missing GenAI attributes
+
+**Catches:** LLM-call spans missing the fields needed to understand cost and
+behavior.
+
+**Scope:** spans where `gen_ai.operation.name == "chat"`. Tool-call spans
+are excluded because they carry `gen_ai.tool.name` instead, by design.
+
+**A span is non-conformant if either:**
+- it lacks any of `gen_ai.system`, `gen_ai.request.model`,
+  `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`,
+  `gen_ai.response.finish_reasons`; or
+- its name isn't exactly `"{operation} {model}"`, e.g. `chat gpt-4.1-nano`.
+
+**Output:** `score = conformant / total`. Missing-field and naming findings
+are reported as separate kinds. The attribute names are imported from
+`otel_griptape.semconv`, so the emitter and the checker can't drift apart.
+
+### R2 — Cardinality risk
+
+**Catches:** raw content (documents, prompts) leaking into indexed span
+attributes, which bloats storage and query cost.
+
+**An attribute key is flagged only when both hold:**
+- `distinct_values / total_spans > 0.8`, **and**
+- average value length > 200 bytes.
+
+Requiring both avoids false positives on short, naturally unique fields.
+Keys containing `trace_id` / `span_id` and SigNoz-reserved keys are
+excluded.
+
+**Output:** `cardinality_risk_score = 100 × flagged_keys / evaluated_keys`.
+
+### R3 — Orphaned spans within a service
+
+**Catches:** context lost across async or threaded work, so spans hang off
+a parent that doesn't exist.
+
+**Detection:** a span whose `parent_span_id` is **set but doesn't resolve**
+to any span in the same trace. Each candidate is cross-checked with
+`signoz_search_traces` so a parent that merely falls outside the query
+window isn't counted.
+
+**Output:** `orphaned_span_rate_pct = 100 × orphaned / spans_with_a_parent`.
+Root spans are excluded from the denominator.
+
+### R6 — Silent truncation
+
+**Catches:** a payload that was only partly delivered to the model.
+
+**Detection:** on spans carrying `payload.raw_bytes` and
+`payload.captured_bytes` (set by `otel-griptape`), flag when
 
 ```
-health_score = 100
-  - (missing_field_rate_pct       * 0.30)   # R1
-  - (cardinality_risk_score       * 0.25)   # R2, normalized 0-100
-  - (orphaned_span_rate_pct       * 0.20)   # R3
-  - (truncation_rate_pct          * 0.20)   # R6
-  - (cross_service_break_rate_pct * 0.05)   # R7
+captured_bytes < raw_bytes × 0.95
 ```
 
-`guardian/health_score.py` clamps the final score to `[0, 100]` but keeps
-the intermediate per-rule terms unclamped for debugging. The R7 term is
-only added when an `r7` result is supplied — `guardian/scheduler.py`'s
-`run_audit_cycle` always fetches and passes one now that R7 is built, so
-this term is present on every audit in this repo's current state.
+The 5% slack is fixed. A second check looks for
+`gen_ai.response.finish_reasons == "length"` in the same trace, so that
+"the input was truncated" and "the model hit its output limit" are reported
+as **distinct finding kinds** (`tool_payload_truncated` vs
+`model_output_truncated`).
+
+**Output:** `truncation_rate_pct = 100 × truncated / payload_spans`.
+
+### R7 — Cross-service trace breaks
+
+**Catches:** a service-to-service call where the `traceparent` header was
+lost, so one request silently becomes two unrelated traces.
+
+**Detection:**
+1. List services via `signoz_list_services`.
+2. Find outbound call spans in service A that target service B (via
+   `peer.service` / `http.url`).
+3. Look for spans in B within **2 seconds** of each call.
+4. If a span in B is a direct child of the call (same `trace_id`,
+   `parent_span_id` = the call's span ID), propagation worked. If instead
+   a new **root** span with a different `trace_id` appeared, that's a
+   broken handoff.
+5. Each span in B is matched to at most one call. The claim checks run
+   concurrently inside one trace, so without this a sibling call's healthy
+   continuation could mask a broken call next to it.
+6. A call with no attributable B span in the window is left unevaluated
+   rather than flagged, so slow or failed calls aren't false positives.
+
+R7 is always reported separately from R3: R3 is a break *inside* one
+service's trace tree; R7 is a break *between* services.
+
+**Output:** `cross_service_break_rate_pct = 100 × broken / handoffs`.
 
 ---
 
-## Rule engine implementation notes worth knowing
+## Health score
 
-A few detection-logic decisions are documented in the rule modules
-themselves and are worth surfacing here rather than leaving buried:
+Computed per service in `guardian/health_score.py`:
 
-- **R1's naming check is literal and exact**: a `gen_ai.operation.name ==
-  "chat"` span must be named exactly `"{operation} {model}"` (e.g. `"chat
-  llama3.2"`). `otel-griptape`'s own instrumentor follows this by
-  construction; any hand-instrumented span reporting `gen_ai.*` attributes
-  (see R6 below) must match it too, or R1 will correctly flag it as a
-  naming-convention violation.
-- **R2's `cardinality_risk_score` normalization** (`100 * flagged_keys /
-  evaluated_keys`) is this implementation's own choice — the spec defines
-  the per-key flag condition but not how to roll it into one 0–100 score.
-- **R3 follows the spec's literal detection text**: only a span whose
-  `parent_span_id` is set but doesn't resolve within the same trace counts
-  as orphaned. A span with no `parent_span_id` at all (a disconnected new
-  trace root) is a different, more severe failure mode than what R3's
-  Section 4.3.1 text describes — this is also why `chaos.py`'s R3 trigger
-  fabricates a bogus-but-present parent span ID rather than clearing
-  context outright.
-- **R6's chaos mechanism routes a real Ollama call, not a fixed slice.**
-  The build spec's baseline chaos design was a fixed character slice
-  (`text[:700]`) applied at `fetch_and_read.py`. This repo instead routes
-  one Fact-Check & Cite claim per `CHAOS_R6_RATE` roll through a real local
-  Ollama model (`ollama_r6.py`) with a small `num_ctx` — Ollama's own
-  context window then silently drops whatever doesn't fit, a genuine
-  truncation rather than a simulated one. `fetch_and_read.py` never
-  truncates; `payload.raw_bytes == payload.captured_bytes` unconditionally
-  on its span. Because `griptape`'s own `OllamaPromptDriver` doesn't
-  populate token usage, `ollama_r6.py` bypasses griptape entirely and calls
-  Ollama's `/api/chat` directly, reading `prompt_eval_count`/`eval_count`
-  for real token counts and deriving `payload.captured_bytes` from
-  `prompt_eval_count` (a chars-per-token approximation, since Ollama
-  doesn't report the truncated byte count directly).
+```
+health_score = 100
+  − missing_field_rate_pct       × 0.30   # R1  ((1 − R1 score) × 100)
+  − cardinality_risk_score       × 0.25   # R2
+  − orphaned_span_rate_pct       × 0.20   # R3
+  − truncation_rate_pct          × 0.20   # R6
+  − cross_service_break_rate_pct × 0.05   # R7
+```
+
+The final score is clamped to `[0, 100]`; the per-rule terms are returned
+unclamped for debugging.
+
+**Alerts** (created at startup only when `GUARDIAN_ALERT_WEBHOOK_URL` is
+set):
+- health score < 70 for any service
+- anomalous spike in cardinality risk
+- truncation rate > 5%
+- cross-service break rate > 0%
+
+---
+
+## Chaos injection
+
+`demo-agent-app/chaos.py` injects one real fault per rule. Nothing fires
+unless `CHAOS_MODE=1`. Each trigger has its own rate (0–1), and
+`CHAOS_SEED` makes a run reproducible.
+
+| Rule | Env var | Default | Injected fault |
+|---|---|---|---|
+| R1 | `CHAOS_R1_RATE` | 0.3 | Drops `gen_ai.usage.input_tokens` or `output_tokens` from a chat span |
+| R2 | `CHAOS_R2_RATE` | 1.0 | Writes the full extracted PDF text into the `document.raw_extracted_text` attribute (~26 KB) |
+| R3 | `CHAOS_R3_RATE` | 0.3 | Gives a parallel claim-check span a fabricated parent span ID |
+| R6 | `CHAOS_R6_RATE` | 1.0 | Routes a claim-check through a local Ollama model with a small context window (`CHAOS_R6_NUM_CTX`, default 2048) |
+| R7 | `CHAOS_R7_RATE` | 0.5 | Calls `citation_service` without a `traceparent` header |
+
+**How R6 is real, not simulated:** the R6 path (`ollama_r6.py`) calls
+Ollama's `/api/chat` directly with the full document. Ollama silently drops
+whatever doesn't fit in `num_ctx`. The span records the full payload as
+`raw_bytes` and derives `captured_bytes` from Ollama's reported
+`prompt_eval_count` (≈ 4 characters per token). `fetch_and_read.py` itself
+never truncates. Ollama calls are serialized, since a local model handles
+one at a time anyway, so they don't queue past
+`OLLAMA_R6_TIMEOUT_SECONDS`. A call that still fails is marked as an error
+span and records no payload sizes, so it never counts as an untruncated
+delivery.
+
+---
+
+## Setup
+
+**Requirements:** Python 3.12, Node.js 20.9+, a SigNoz Cloud workspace, an
+OpenAI API key (or Ollama for the Guardian's LLM), and
+[Ollama](https://ollama.com) with `llama3.2` for the R6 chaos path.
+
+```bash
+python -m venv venv && source venv/bin/activate
+
+pip install -r requirements.txt
+pip install -e otel-griptape
+pip install -e "guardian[test]"
+pip install -r demo-agent-app/requirements.txt
+
+(cd frontend-next && npm install)
+
+cp env.example .env
+```
+
+### Configure `.env`
+
+| Variable | Purpose |
+|---|---|
+| `SIGNOZ_INSTANCE_URL` | Your workspace, e.g. `https://<name>.us2.signoz.cloud` |
+| `SIGNOZ_MCP_URL` | Hosted MCP endpoint, e.g. `https://mcp.us2.signoz.cloud/mcp` |
+| `SIGNOZ_API_KEY` | SigNoz API key, used for MCP |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | e.g. `https://ingest.us2.signoz.cloud:443` |
+| `OTEL_EXPORTER_OTLP_HEADERS` | `signoz-ingestion-key=<key>` — the **ingestion key**, which is different from the API key |
+| `LLM_PROVIDER` | `openai` or `ollama` |
+| `OPENAI_API_KEY`, `OPENAI_MODEL` | For the OpenAI path |
+| `OLLAMA_BASE_URL`, `OLLAMA_MODEL` | For the Ollama path and R6 |
+| `AUDIT_SERVICES` | Services to audit, e.g. `demo-agent-app` |
+| `AUDIT_WINDOW` | Time window per audit, e.g. `15m`, `1h` |
+| `AUDIT_INTERVAL_MINUTES` | Scheduler interval |
+| `CITATION_SERVICE_URL` | Must match the port `citation_service` runs on (default `http://localhost:8100`) |
+| `GUARDIAN_ALERT_WEBHOOK_URL` | Optional; enables alert provisioning |
+| `CORS_ALLOW_ORIGINS` | Browser origins allowed to call Guardian and the demo API (default `http://localhost:3000,http://127.0.0.1:3000`) |
+| `DEMO_AGENT_RUN_TIMEOUT_SECONDS` | Max duration of one demo-API pipeline run (default `600`) |
+| `OLLAMA_R6_TIMEOUT_SECONDS` | Timeout for each R6 Ollama call (default `60`) |
+
+The frontend reads `NEXT_PUBLIC_GUARDIAN_API_URL` (default
+`http://localhost:8000`) and `NEXT_PUBLIC_DEMO_AGENT_API_URL` (default
+`http://localhost:8001`).
+
+### Verify connectivity
+
+```bash
+python verify_mcp_connection.py
+```
+
+It should list the `signoz_*` MCP tools and end with `PASS`. A `404` from
+SigNoz usually means the workspace URL is wrong or no longer exists. A
+`401` on span export means the ingestion key is wrong.
+
+---
+
+## Reproducing an audit
+
+### 1. One-time preparation
+
+```bash
+python demo-agent-app/fixtures/generate_fixture_pdf.py   # 35-page PDF used by R2/R6
+python guardian/scripts/provision_dashboards.py          # optional: SigNoz dashboard (--dry-run to preview)
+
+ollama serve            # if not already running
+ollama pull llama3.2
+```
+
+### 2. Start the services (one terminal each)
+
+```bash
+# citation service, R7's target
+cd demo-agent-app && uvicorn citation_service:app --port 8100
+
+# demo agent API, used by the frontend
+cd demo-agent-app && uvicorn api:app --port 8001
+
+# Guardian
+uvicorn guardian.main:app --port 8000
+
+# dashboard (optional)
+cd frontend-next && npm run dev       # http://localhost:3000
+```
+
+### 3. Generate traces
+
+```bash
+cd demo-agent-app
+
+# healthy baseline
+python app.py \
+  --question "What does the Kestrel Basin report say about sea level rise and drought?" \
+  --pdf fixtures/long_climate_report.pdf
+
+# chaos run: forcing R7 to 1.0 guarantees every rule fires in one run
+CHAOS_MODE=1 CHAOS_SEED=7 CHAOS_R7_RATE=1.0 python app.py \
+  --question "What does the Kestrel Basin report say about sea level rise and drought?" \
+  --pdf fixtures/long_climate_report.pdf
+```
+
+Wait about 20 seconds for SigNoz to ingest the spans.
+
+### 4. Run the audit
+
+```bash
+curl -s -X POST localhost:8000/audit/run -H 'content-type: application/json' -d '{}'
+```
+
+Example from a single chaos run with default rates, audited over a
+10-minute window:
+
+| Rule | Result |
+|---|---|
+| R1 | 1 of 8 chat spans non-conformant (an injected missing token count) |
+| R2 | `document.raw_extracted_text` flagged — 100% distinct, 26,737 bytes |
+| R3 | 2 of 39 parented spans orphaned |
+| R6 | 6 of 7 payload spans truncated — 26,737 bytes sent, about 4,100 reached `llama3.2` |
+| R7 | 1 of 6 citation calls broken — matching the one dropped `traceparent` |
+
+Health score: **76.8 / 100**, with a narrative citing each span ID.
+Exact numbers vary per run, since the chaos rolls are random unless
+`CHAOS_SEED` is set.
+
+### 5. Ask about it
+
+```bash
+curl -s -X POST localhost:8000/chat -H 'content-type: application/json' \
+  -d '{"service":"demo-agent-app","question":"Why is the health score below 70 and what should I fix first?"}'
+```
+
+### 6. Run the tests
+
+```bash
+pytest guardian/tests
+(cd otel-griptape && pytest)
+```
+
+The `experiments/test_stage3.py` … `test_stage8.py` scripts are the live,
+end-to-end verification drivers used during development;
+`test_stage8.py` covers R1–R7 against a running Guardian.
+
+---
+
+## API reference
+
+**Guardian** (`:8000`)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health` | Liveness |
+| `POST` | `/audit/run` | Run an audit now (same code path as the scheduler) |
+| `GET` | `/audit/report/{service}` | Latest cached report; 404 until the first audit completes |
+| `POST` | `/chat` | `{"service", "question"}` → answer grounded in the cached report |
+| `POST` | `/webhooks/alerts` | Receives SigNoz alert webhooks |
+| `GET` | `/alerts`, `/alerts/stream` | Recent alerts, and a server-sent event stream |
+
+**Demo agent** (`:8001`): `POST /run`, `POST /run/upload`, `GET /ollama/models`
+**Citation service** (`:8100`): `GET /health`, `POST /verify_citation`
 
 ---
 
@@ -196,194 +418,63 @@ themselves and are worth surfacing here rather than leaving buried:
 
 ```
 telemetry-health-guardian/
-├── README.md
-├── requirements.txt
-├── env.example
-│
-├── otel-griptape/                     # auto-instrumentation library (standalone-installable)
-│   ├── README.md                      # see this for otel-griptape's own module-by-module docs
-│   ├── pyproject.toml
-│   ├── otel_griptape/
-│   │   ├── __init__.py
-│   │   ├── instrumentor.py            # wraps Agent.run / Task dispatch / PromptDriver.run
-│   │   ├── semconv.py                 # gen_ai.* attribute constants
-│   │   ├── context_propagation.py     # ThreadPoolExecutor.submit patch + traceparent forwarding
-│   │   └── payload_tracking.py        # payload.raw_bytes / payload.captured_bytes (R6)
-│   └── tests/test_instrumentor.py
-│
-├── demo-agent-app/                    # document research pipeline
-│   ├── README.md                      # see this for stage-by-stage docs
-│   ├── api.py                         # FastAPI wrapper for the demo agent
-│   ├── app.py                         # orchestrates the 4 stages
-│   ├── planner.py                     # Stage 1
-│   ├── fetch_and_read.py              # Stage 2 — full-text extraction, no truncation
-│   ├── fact_check_and_cite.py         # Stage 3 — concurrent claim checks; R3 site; routes to citation_service.py
-│   ├── report_writer.py               # Stage 4
-│   ├── citation_service.py            # separate HTTP service (own port/service name) — R7 site
-│   ├── chaos.py                       # seeded fault injection: R1/R2/R3/R6/R7 triggers
-│   ├── ollama_r6.py                   # R6's real-Ollama-truncation claim-check path
-│   ├── telemetry.py                   # OTel bootstrap + Griptape default driver config
-│   ├── requirements.txt
-│   └── fixtures/generate_fixture_pdf.py   # generates the 35-page fixture used for R6
-│
+├── otel-griptape/              # instrumentation library
+│   └── otel_griptape/
+│       ├── instrumentor.py         # wraps prompt-driver, tool, and structure runs
+│       ├── semconv.py              # gen_ai.* attribute names (shared with R1)
+│       ├── context_propagation.py  # thread-pool context + traceparent injection
+│       └── payload_tracking.py     # payload.raw_bytes / captured_bytes
+├── demo-agent-app/             # workload under audit
+│   ├── app.py                      # CLI: runs the 4-stage pipeline
+│   ├── api.py                      # HTTP wrapper used by the frontend
+│   ├── planner.py · fetch_and_read.py · fact_check_and_cite.py · report_writer.py
+│   ├── citation_service.py         # separate service (R7 target)
+│   ├── ollama_r6.py                # real context-window truncation path
+│   ├── chaos.py                    # seeded fault injection
+│   └── telemetry.py                # OTel bootstrap
 ├── guardian/
-│   ├── README.md                      # see this for module-by-module + API docs
-│   ├── main.py                        # FastAPI app: /health, /audit/run, /audit/report/{service}, /chat
-│   ├── scheduler.py                   # APScheduler audit loop + AuditStore cache
-│   ├── mcp_client.py                  # SigNoz MCP session wrapper (cloud primary, self-host fallback)
-│   ├── rules/
-│   │   ├── r1_missing_fields.py
-│   │   ├── r2_cardinality.py
-│   │   ├── r3_orphaned_spans.py
-│   │   ├── r6_silent_truncation.py
-│   │   ├── r7_cross_service_breaks.py
-│   │   └── types.py                   # AuditWindow
-│   ├── llm_client.py                  # LiteLLM OpenAI/Ollama abstraction
-│   ├── narrative.py                   # combines rule results into cited natural-language reports
+│   ├── main.py                     # FastAPI app
+│   ├── scheduler.py                # audit loop + report cache
+│   ├── mcp_client.py               # SigNoz MCP session wrapper
+│   ├── rules/                      # r1, r2, r3, r6, r7
 │   ├── health_score.py
-│   ├── writeback.py                   # metrics/logs (direct OTLP) + alerts/notification channel (MCP)
+│   ├── narrative.py · llm_client.py   # LLM reports and chat (LiteLLM)
+│   ├── writeback.py                # OTLP metrics/logs + MCP alerts
 │   ├── scripts/provision_dashboards.py
-│   ├── pyproject.toml
-│   ├── requirements.txt
-│   └── tests/                         # test_r1..r7, test_health_score, test_llm_client,
-│                                       # test_narrative, test_main, test_scheduler
-│
-├── frontend-next/                     # Next.js dashboard + chat UI
-│   ├── package.json
-│   ├── app/                           # Next.js App Router pages
-│   ├── components/                    # charts/, product/, ui/ component libraries
-│   ├── lib/                           # shared utilities
-│   └── styles/
-│
-└── experiments/                       # per-stage verification drivers + build notes
-    ├── stage_wise_guidance.txt
-    └── test_stage3.py … test_stage8.py
+│   └── tests/
+├── frontend-next/              # Next.js dashboard
+├── experiments/                # live verification drivers
+├── verify_mcp_connection.py
+└── env.example
 ```
 
 ---
 
-## Setup
+## Known limitations
 
-```bash
-cp env.example .env   # fill in SigNoz Cloud MCP creds + at least one LLM provider
-
-pip install -r requirements.txt
-pip install -e otel-griptape
-pip install -e guardian[test]
-pip install -r demo-agent-app/requirements.txt
-cd frontend-next && npm install && cd ..
-```
-
-`env.example` covers: SigNoz Cloud MCP (`SIGNOZ_INSTANCE_URL`,
-`SIGNOZ_MCP_URL`, `SIGNOZ_API_KEY`, `SIGNOZ_MCP_MODE`, `SIGNOZ_CLOUD_REGION`
-— see [`guardian/README.md`](guardian/README.md#configuration) for the
-cloud-vs-self-hosted switch), the OTLP export target for the demo app
-(`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`,
-`OTEL_SERVICE_NAME`), the LLM reasoning layer (`LLM_PROVIDER`,
-`OPENAI_API_KEY`, `OPENAI_MODEL`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL`), the
-Guardian service (`AUDIT_INTERVAL_MINUTES`, `FASTAPI_PORT`,
-`AUDIT_SERVICES`, `AUDIT_WINDOW`, `GUARDIAN_ALERT_WEBHOOK_URL`), the
-frontend (`GUARDIAN_API_URL`), `citation_service.py`
-(`CITATION_SERVICE_URL`, `CITATION_SERVICE_PORT`,
-`CITATION_SERVICE_TIMEOUT_SECONDS`), and `ollama_r6.py`'s own call timeout
-(`OLLAMA_R6_TIMEOUT_SECONDS`, separate from the Guardian's own
-`LLM_PROVIDER=ollama` path but pointed at the same `OLLAMA_BASE_URL`).
-`guardian/scheduler.py` defaults `AUDIT_WINDOW` to `5m` if unset — the
-shipped `env.example` sets it to `1h`, so back-to-back demo/chaos runs
-done more than a few minutes apart can land in the same audit window; run
-the pipeline immediately before auditing, or narrow `AUDIT_WINDOW`, if you
-want a single run isolated.
-
-R6's Ollama-routed path additionally needs a local Ollama instance with the
-configured model pulled:
-
-```bash
-ollama serve
-ollama pull llama3.2   # or whatever CHAOS_R6_OLLAMA_MODEL is set to
-```
+- **Partly framework-agnostic.** R1, R2, R3 and R7 work on any service
+  that emits standard OTel / GenAI spans. R6 only fires when spans carry
+  `payload.raw_bytes` and `payload.captured_bytes`; without them it
+  reports nothing rather than erroring. `otel-griptape` is
+  Griptape-specific by design.
+- **Repeated runs can hide R2.** R2 measures uniqueness across the whole
+  audit window. Running the same PDF several times within one
+  `AUDIT_WINDOW` makes the leaked text repeat, its distinct ratio falls
+  below 0.8, and it stops being flagged. Use a short window or a single
+  fresh run when demoing.
+- **R7 relies on timing as well as IDs.** A broken call is paired with
+  the nearest unclaimed new root span in the callee within 2 seconds. If
+  several broken calls fire within the same millisecond, the count is
+  exact but which call maps to which new trace is a best guess.
+- **A demo run with R6 enabled takes a few minutes**, because Ollama calls
+  are serialized. The demo API allows 600 s by default.
+- **R6's `model_output_truncated` half** depends on
+  `finish_reasons == "length"` being searchable in SigNoz logs.
+  `otel-griptape` currently records it only as a span attribute, so that
+  half has not been exercised live.
+- **`captured_bytes` on the Ollama path is approximate**, derived from
+  token counts at ~4 characters per token.
 
 ---
 
-## Running it
-
-```bash
-# one-time: generate the long PDF fixture R6 needs
-python demo-agent-app/fixtures/generate_fixture_pdf.py
-
-# one-time: provision dashboards
-python guardian/scripts/provision_dashboards.py
-
-# generate a baseline trace
-cd demo-agent-app
-python app.py --question "What does the Kestrel Basin report say about sea level rise and drought?" --pdf fixtures/long_climate_report.pdf
-
-# generate a chaos trace (see chaos.py for every CHAOS_* env var and its default rate)
-CHAOS_MODE=1 python app.py --question "What does the Kestrel Basin report say about sea level rise and drought?" --pdf fixtures/long_climate_report.pdf
-
-# separately: the R7 citation service (its own process/port)
-uvicorn citation_service:app --port 8100
-cd ..
-
-# start the backend
-uvicorn guardian.main:app --reload --port 8000
-# start demo agent
-uvicorn api:app --port 8001
-
-# (optional) start the frontend
-cd frontend-next && npm run dev
-```
-
-`chaos.py`'s triggers, each independently rated (`CHAOS_MODE=1` required for
-any of them to fire):
-
-| Trigger | Env var | Default rate | What it does |
-|---|---|---|---|
-| R1 | `CHAOS_R1_RATE` | 0.3 | drops one of `gen_ai.usage.input_tokens` / `output_tokens` on a chat span |
-| R2 | `CHAOS_R2_RATE` | 1.0 | tags a `fetch_and_read.read_pdf` span with raw extracted text as an indexed attribute |
-| R3 | `CHAOS_R3_RATE` | 0.3 | fabricates a non-existent parent span ID for one parallel claim-check call |
-| R6 | `CHAOS_R6_RATE` | 1.0 | routes one claim-check through Ollama (`CHAOS_R6_OLLAMA_MODEL`, default `llama3.2`; `CHAOS_R6_NUM_CTX`, default 2048) instead of OpenAI |
-| R7 | `CHAOS_R7_RATE` | 0.5 | sends one citation-service call with no `traceparent` header |
-
-`CHAOS_SEED` makes a run reproducible.
-
-## Verifying against a live audit
-
-`experiments/test_stage3.py` … `test_stage8.py` are the per-stage
-verification drivers this project was built and gate-checked against
-(`test_stage8.py` is the current end-to-end driver, covering R1 through R7
-against a live `POST /audit/run` and `POST /chat`). Each prints the
-per-rule denominators (`R1.total_gen_ai_spans`, `R6.total_payload_spans`,
-etc.) alongside the findings, specifically so an audit that found genuinely
-no data is distinguishable from a clean, healthy one.
-
----
-
-## Portability
-
-This system is **partially** framework-agnostic, not fully:
-
-- **Genuinely agent-framework-agnostic:** R1, R2, R3, and R7 all query
-  SigNoz's stored telemetry generically — span attribute presence,
-  cardinality stats, trace-tree structure, cross-service call patterns.
-  None of them inspect what produced the telemetry. Point the Guardian's
-  rule engine at any service emitting standard OTel `gen_ai.*` spans and
-  these four rules work immediately, no Guardian code changes.
-- **Not agent-framework-agnostic:** `otel-griptape` is Griptape-specific by
-  construction — it wraps Griptape's own `Agent.run()` / `Structure.run()` /
-  `PromptDriver.run()`. That's intentional: its value is specifically that
-  it fills a real gap for a framework with no existing OTel support.
-- **R6** depends on two custom span attributes (`payload.raw_bytes`,
-  `payload.captured_bytes`) that only `otel-griptape` (or a hand-written
-  span like `ollama_r6.py`'s) sets. Point the Guardian at an app that
-  doesn't set them and R6 doesn't error — it simply never fires, because
-  there's nothing for it to compare.
-
----
-
-## License / attribution
-
-Built against `telemetry-health-guardian-BUILD-SPEC.md` as a submission
-demonstrating auto-instrumentation for an unsupported agent framework
-(`otel-griptape`) alongside an MCP-driven telemetry-quality auditor
-(Guardian) that treats observability data itself, not just agent behavior,
-as something worth verifying.
+<p align="center"><b>Made for the SigNoz Hackathon.</b></p>

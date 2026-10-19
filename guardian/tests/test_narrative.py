@@ -168,7 +168,7 @@ def test_probable_fixes_only_returns_fired_rules():
 
     assert sorted(fixes) == ["R3", "R6"]
     assert "context" in fixes["R3"]
-    assert "payload" in fixes["R6"]
+    assert "num_ctx" in fixes["R6"]
 
 
 # -- generate_report / answer_question: mocked-completion integration ------
